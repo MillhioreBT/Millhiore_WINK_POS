@@ -1,0 +1,17 @@
+{
+  "name": "@millhiore/printing",
+  "version": "0.0.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@millhiore/contracts": "workspace:*"
+  }
+}

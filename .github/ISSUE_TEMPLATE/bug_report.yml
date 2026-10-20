@@ -1,0 +1,86 @@
+name: Error
+description: Algo no funciona como debería
+title: "[Error] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por avisar. **No publiques datos reales** de un comercio ni de sus clientes (cédulas, RIF, saldos, facturas) ni capturas que los muestren.
+        Si es una **vulnerabilidad de seguridad**, no uses este formulario: sigue [SECURITY.md](../blob/main/SECURITY.md).
+  - type: textarea
+    id: que-paso
+    attributes:
+      label: ¿Qué pasó?
+      description: Cuéntalo con tus palabras, y qué esperabas que pasara.
+    validations:
+      required: true
+  - type: textarea
+    id: pasos
+    attributes:
+      label: Pasos para reproducirlo
+      placeholder: |
+        1. Abrir la caja con un turno abierto
+        2. Agregar un producto con descuento
+        3. Cobrar en dólares y dar el vuelto en bolívares
+        4. …
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: ¿En qué parte ocurre?
+      multiple: true
+      options:
+        - Caja (vender y cobrar)
+        - Turnos y cierre
+        - Productos e inventario
+        - Compras y proveedores
+        - Fiado y cuentas por cobrar
+        - Gastos y cuentas por pagar
+        - Cuentas y transferencias
+        - Informes y Excel
+        - Impresión (térmica, gaveta, PDF)
+        - Tasa del BCV
+        - Usuarios, roles y contraseñas
+        - Respaldos y restauración
+        - App de escritorio (instalador)
+        - Otra
+    validations:
+      required: true
+  - type: dropdown
+    id: como-se-usa
+    attributes:
+      label: ¿Cómo lo estás usando?
+      options:
+        - App de escritorio (Windows)
+        - bun run start en una PC
+        - Desde el celular o una tablet en la red local
+        - Otro
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Versión o commit
+      description: Se ve en Ajustes, o con `git rev-parse --short HEAD` si lo corres desde el código.
+  - type: input
+    id: entorno
+    attributes:
+      label: Sistema y navegador
+      placeholder: Windows 10, Chrome 130 · Android 13, Chrome
+  - type: textarea
+    id: registros
+    attributes:
+      label: Mensajes de error o capturas
+      description: Pega el texto del error (consola del servidor o del navegador). Tapa cualquier dato real antes de adjuntar una captura.
+      render: shell
+  - type: checkboxes
+    id: confirmaciones
+    attributes:
+      label: Antes de enviar
+      options:
+        - label: Busqué si ya existía un issue igual.
+          required: true
+        - label: No incluí datos reales de un comercio ni de sus clientes.
+          required: true

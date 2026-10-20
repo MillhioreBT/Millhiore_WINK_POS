@@ -1,0 +1,1 @@
+ALTER TABLE `user` ADD `pin_hash` text;

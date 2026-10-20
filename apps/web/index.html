@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#3b4fd8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Millhiore WINK POS</title>
+    <script>
+      // Tema antes de pintar, para no destellar en modo oscuro.
+      try {
+        const t = localStorage.getItem("theme")
+        if (t === "dark" || (!t && matchMedia("(prefers-color-scheme: dark)").matches)) {
+          document.documentElement.classList.add("dark")
+        }
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

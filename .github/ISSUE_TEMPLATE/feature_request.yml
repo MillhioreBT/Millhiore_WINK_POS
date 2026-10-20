@@ -1,0 +1,56 @@
+name: Idea o función nueva
+description: Propón algo que le haga falta a tu negocio
+title: "[Idea] "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antes de proponer, mira la [hoja de ruta](../blob/main/PLAN.md#14-hoja-de-ruta): puede que ya esté planificado. Si es así, cuéntanos qué tan importante es para ti.
+  - type: textarea
+    id: problema
+    attributes:
+      label: ¿Qué problema tienes hoy?
+      description: Cuéntalo desde el día a día del negocio, no desde la solución. ¿Qué haces ahora para resolverlo (cuaderno, Excel, otro sistema)?
+    validations:
+      required: true
+  - type: textarea
+    id: propuesta
+    attributes:
+      label: ¿Cómo te gustaría que funcionara?
+      description: Describe cómo lo imaginas, paso a paso. Si otro sistema (por ejemplo Wink POS) lo resuelve bien, dinos cómo.
+    validations:
+      required: true
+  - type: dropdown
+    id: tipo-negocio
+    attributes:
+      label: ¿Para qué tipo de negocio?
+      multiple: true
+      options:
+        - Bodega o abasto
+        - Tienda (ropa, accesorios, etc.)
+        - Restaurante o cafetería
+        - Servicios
+        - Otro
+  - type: dropdown
+    id: urgencia
+    attributes:
+      label: ¿Qué tan necesario es?
+      options:
+        - Sin esto no puedo usar el sistema
+        - Me ahorraría mucho trabajo
+        - Sería agradable tenerlo
+    validations:
+      required: true
+  - type: textarea
+    id: fiscal
+    attributes:
+      label: ¿Tiene que ver con impuestos o normativa?
+      description: Si toca IVA, IGTF, retenciones o facturación, cita la norma o la fuente si la tienes.
+  - type: checkboxes
+    id: contribucion
+    attributes:
+      label: Colaboración
+      options:
+        - label: Me gustaría ayudar a construirlo (código, pruebas o documentación).
+        - label: Puedo probarlo en mi negocio cuando esté listo.

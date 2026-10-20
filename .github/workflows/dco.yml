@@ -1,0 +1,31 @@
+name: DCO
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  signoff:
+    name: Commits firmados (Signed-off-by)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verificar que cada commit lleve Signed-off-by
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          fail=0
+          for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            # Dependabot y otros bots no firman
+            case "$(git log -1 --format=%ae "$sha")" in *"[bot]"*) continue ;; esac
+            if ! git log -1 --format=%B "$sha" | grep -qiE '^Signed-off-by: .+ <.+>$'; then
+              echo "::error::Falta Signed-off-by en $(git log -1 --format='%h %s' "$sha"). Usa git commit -s (ver CONTRIBUTING.md)."
+              fail=1
+            fi
+          done
+          exit $fail

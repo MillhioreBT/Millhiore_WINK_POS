@@ -1,0 +1,16 @@
+{
+  "name": "@millhiore/desktop",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare-sidecar": "bun scripts/prepare-sidecar.ts",
+    "tauri": "tauri",
+    "desktop:dev": "bun scripts/prepare-sidecar.ts && tauri dev",
+    "desktop:build": "bun scripts/prepare-sidecar.ts && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.3"
+  }
+}

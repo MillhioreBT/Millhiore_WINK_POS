@@ -1,0 +1,21 @@
+# Todo el texto se guarda y se descarga con LF, también en Windows, para que
+# Biome y git no discutan por los finales de línea (core.autocrlf=true).
+* text=auto eol=lf
+
+# Binarios
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.db binary
+*.sqlite binary
+*.xlsx binary
+*.exe binary
+
+# Generados: GitHub los colapsa en los diffs y no cuentan en las estadísticas del lenguaje
+bun.lock linguist-generated
+Cargo.lock linguist-generated
+packages/db/drizzle/meta/** linguist-generated

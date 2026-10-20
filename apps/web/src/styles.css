@@ -1,0 +1,29 @@
+@import "tailwindcss";
+@import "@millhiore/ui/theme.css";
+
+/* Los componentes viven en packages/ui: Tailwind debe ver sus clases. */
+@source "../../../packages/ui/src";
+
+/* Recibo: al imprimir solo se ve el ticket, al ancho del papel térmico. */
+@media print {
+  @page {
+    size: 80mm auto;
+    margin: 4mm;
+  }
+  body * {
+    visibility: hidden;
+  }
+  #receipt,
+  #receipt * {
+    visibility: visible;
+  }
+  #receipt {
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 72mm;
+    color: #000;
+    background: #fff;
+    box-shadow: none;
+    border: 0;
+  }
+}

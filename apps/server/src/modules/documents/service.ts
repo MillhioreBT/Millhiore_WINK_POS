@@ -1,0 +1,205 @@
+import type { DocumentDetail, DocumentSummary } from "@millhiore/contracts"
+import {
+  allocation,
+  contact,
+  type Db,
+  document,
+  documentLine,
+  documentSurcharge,
+  documentTax,
+  expenseCategory,
+  payment,
+  paymentMethod,
+  stockReason,
+  user,
+  variant,
+} from "@millhiore/db"
+import { DOCUMENT_TYPES, type DocumentType } from "@millhiore/domain"
+import { and, asc, desc, eq, gte, inArray, lt } from "drizzle-orm"
+import { alias } from "drizzle-orm/sqlite-core"
+import { HttpError } from "../../http/errors"
+
+const reversal = alias(document, "reversal")
+/** La venta de la que es una devolución. */
+const returned = alias(document, "returned")
+
+const summaryColumns = {
+  id: document.id,
+  type: document.type,
+  number: document.number,
+  postedAt: document.postedAt,
+  currency: document.currency,
+  legalCurrency: document.legalCurrency,
+  totalMinor: document.totalMinor,
+  totalLegalMinor: document.totalLegalMinor,
+  surchargeMinor: document.surchargeMinor,
+  surchargeLegalMinor: document.surchargeLegalMinor,
+  reversesDocumentId: document.reversesDocumentId,
+  reversedBy: reversal.id,
+  createdBy: user.name,
+  contactId: document.contactId,
+  contactName: contact.name,
+  contactTaxId: contact.taxId,
+  externalRef: document.externalRef,
+  note: document.note,
+  discountMinor: document.discountMinor,
+  discountLegalMinor: document.discountLegalMinor,
+  returnsDocumentId: document.returnsDocumentId,
+  returnsNumber: returned.number,
+  expenseCategoryId: document.expenseCategoryId,
+  expenseCategoryName: expenseCategory.name,
+  stockReasonId: document.stockReasonId,
+  stockReasonName: stockReason.name,
+  creditMinor: document.creditMinor,
+  creditCurrency: document.creditCurrency,
+  dueAt: document.dueAt,
+}
+
+export function isDocumentType(value: string): value is DocumentType {
+  return (DOCUMENT_TYPES as readonly string[]).includes(value)
+}
+
+/** Documentos más recientes primero, con filtro opcional por tipo y rango de fechas. */
+export function listDocuments(
+  db: Db,
+  opts: {
+    types?: DocumentType[] | undefined
+    from?: number | undefined
+    to?: number | undefined
+    /** Solo gastos de esta categoría. */
+    expenseCategoryId?: string | undefined
+    limit: number
+  },
+): DocumentSummary[] {
+  const filters = [
+    opts.types?.length ? inArray(document.type, opts.types) : undefined,
+    opts.from !== undefined ? gte(document.postedAt, opts.from) : undefined,
+    opts.to !== undefined ? lt(document.postedAt, opts.to) : undefined,
+    opts.expenseCategoryId ? eq(document.expenseCategoryId, opts.expenseCategoryId) : undefined,
+  ].filter((f) => f !== undefined)
+  return db
+    .select(summaryColumns)
+    .from(document)
+    .leftJoin(reversal, eq(reversal.reversesDocumentId, document.id))
+    .leftJoin(returned, eq(returned.id, document.returnsDocumentId))
+    .leftJoin(user, eq(user.id, document.createdBy))
+    .leftJoin(contact, eq(contact.id, document.contactId))
+    .leftJoin(expenseCategory, eq(expenseCategory.id, document.expenseCategoryId))
+    .leftJoin(stockReason, eq(stockReason.id, document.stockReasonId))
+    .where(filters.length ? and(...filters) : undefined)
+    .orderBy(desc(document.postedAt), desc(document.id))
+    .limit(opts.limit)
+    .all()
+}
+
+/** Documento completo: líneas con nombre, pagos con su método y desglose de IVA e IGTF. */
+export function getDocument(db: Db, id: string): DocumentDetail {
+  const head = db
+    .select({
+      ...summaryColumns,
+      rateBase: document.rateBase,
+      rateQuote: document.rateQuote,
+      rateValue: document.rateValue,
+      pricesIncludeTax: document.pricesIncludeTax,
+    })
+    .from(document)
+    .leftJoin(reversal, eq(reversal.reversesDocumentId, document.id))
+    .leftJoin(returned, eq(returned.id, document.returnsDocumentId))
+    .leftJoin(user, eq(user.id, document.createdBy))
+    .leftJoin(contact, eq(contact.id, document.contactId))
+    .leftJoin(expenseCategory, eq(expenseCategory.id, document.expenseCategoryId))
+    .leftJoin(stockReason, eq(stockReason.id, document.stockReasonId))
+    .where(eq(document.id, id))
+    .get()
+  if (!head) throw new HttpError(404, "NOT_FOUND", `No existe el documento ${id}`)
+  const { rateBase, rateQuote, rateValue, ...summary } = head
+
+  const lines = db
+    .select({
+      lineNo: documentLine.lineNo,
+      variantId: documentLine.variantId,
+      name: variant.name,
+      qtyMilli: documentLine.qtyMilli,
+      unitPriceMinor: documentLine.unitPriceMinor,
+      discountMinor: documentLine.discountMinor,
+      lineTotalMinor: documentLine.lineTotalMinor,
+      taxId: documentLine.taxId,
+      taxRateBp: documentLine.taxRateBp,
+    })
+    .from(documentLine)
+    .innerJoin(variant, eq(variant.id, documentLine.variantId))
+    .where(eq(documentLine.documentId, id))
+    .orderBy(asc(documentLine.lineNo))
+    .all()
+
+  const payments = db
+    .select({
+      id: payment.id,
+      paymentMethodId: payment.paymentMethodId,
+      methodName: paymentMethod.name,
+      currency: payment.currency,
+      amountMinor: payment.amountMinor,
+      reference: payment.reference,
+      surchargeId: payment.surchargeId,
+    })
+    .from(payment)
+    .innerJoin(paymentMethod, eq(paymentMethod.id, payment.paymentMethodId))
+    .where(eq(payment.documentId, id))
+    .orderBy(asc(payment.id))
+    .all()
+
+  const taxes = db
+    .select({
+      taxId: documentTax.taxId,
+      kind: documentTax.kind,
+      rateBp: documentTax.rateBp,
+      baseMinor: documentTax.baseMinor,
+      taxMinor: documentTax.taxMinor,
+      baseLegalMinor: documentTax.baseLegalMinor,
+      taxLegalMinor: documentTax.taxLegalMinor,
+    })
+    .from(documentTax)
+    .where(eq(documentTax.documentId, id))
+    .orderBy(asc(documentTax.position))
+    .all()
+
+  const surcharges = db
+    .select({
+      surchargeId: documentSurcharge.surchargeId,
+      rateBp: documentSurcharge.rateBp,
+      baseMinor: documentSurcharge.baseMinor,
+      amountMinor: documentSurcharge.amountMinor,
+      baseLegalMinor: documentSurcharge.baseLegalMinor,
+      amountLegalMinor: documentSurcharge.amountLegalMinor,
+    })
+    .from(documentSurcharge)
+    .where(eq(documentSurcharge.documentId, id))
+    .orderBy(asc(documentSurcharge.position))
+    .all()
+
+  const sale = alias(document, "sale")
+  const allocations = db
+    .select({
+      saleDocumentId: allocation.saleDocumentId,
+      saleNumber: sale.number,
+      amountMinor: allocation.amountMinor,
+    })
+    .from(allocation)
+    .innerJoin(sale, eq(sale.id, allocation.saleDocumentId))
+    .where(eq(allocation.paymentDocumentId, id))
+    .orderBy(asc(sale.postedAt), asc(sale.id))
+    .all()
+
+  return {
+    ...summary,
+    rate:
+      rateBase && rateQuote && rateValue
+        ? { base: rateBase, quote: rateQuote, value: rateValue }
+        : null,
+    lines,
+    payments,
+    taxes,
+    surcharges,
+    allocations,
+  }
+}

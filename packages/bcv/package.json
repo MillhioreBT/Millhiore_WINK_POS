@@ -1,0 +1,15 @@
+{
+  "name": "@millhiore/bcv",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Obtención de la tasa oficial del BCV (fuentes con respaldo). Sin dependencias.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

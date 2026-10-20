@@ -1,0 +1,4 @@
+#!/bin/sh
+# Revisa con Biome lo que está preparado para el commit (formato y lint).
+# Se activa solo con `bun install` (script "prepare"). Para saltarlo una vez: git commit --no-verify
+exec bunx biome check --staged --no-errors-on-unmatched

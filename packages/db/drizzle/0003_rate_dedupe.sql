@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `exchange_rate_dedupe` ON `exchange_rate` (`base`,`quote`,`effective_at`,`source`);

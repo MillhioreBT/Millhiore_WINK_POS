@@ -1,0 +1,30 @@
+{
+  "name": "@millhiore/server",
+  "version": "0.0.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun src/main.ts",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hono/zod-openapi": "1.6.3",
+    "@millhiore/bcv": "workspace:*",
+    "@millhiore/contracts": "workspace:*",
+    "@millhiore/db": "workspace:*",
+    "@millhiore/domain": "workspace:*",
+    "@millhiore/printing": "workspace:*",
+    "@scalar/hono-api-reference": "0.12.12",
+    "better-auth": "1.7.8",
+    "croner": "10.0.1",
+    "drizzle-orm": "0.45.4",
+    "hono": "4.13.13",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "fast-check": "4.10.2"
+  }
+}

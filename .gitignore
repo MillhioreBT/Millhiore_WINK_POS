@@ -1,0 +1,53 @@
+# Dependencias y caché de herramientas
+node_modules/
+.turbo/
+*.tsbuildinfo
+.cache/
+coverage/
+
+# Compilación
+dist/
+target/
+
+# Datos locales: bases de datos, respaldos y la carpeta de datos del servidor en desarrollo
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.bak
+
+# Secretos y firmas (nunca al repositorio)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Registros y reportes de pruebas
+*.log
+playwright-report/
+test-results/
+
+# App de escritorio: artefactos generados por apps/desktop/scripts/prepare-sidecar.ts y Tauri
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/resources/
+apps/desktop/src-tauri/gen/
+apps/desktop/splash/icon.svg
+
+# Sistema operativo y editores
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Herramientas de asistencia local
+.claude/settings.local.json
+graphify-out/

@@ -1,0 +1,25 @@
+name: Pregunta o duda de uso
+description: No sabes cómo hacer algo con el sistema
+title: "[Duda] "
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Revisa primero el [README](../blob/main/README.md) y la carpeta [docs](../tree/main/docs). **No publiques datos reales** de un comercio ni de sus clientes.
+  - type: textarea
+    id: pregunta
+    attributes:
+      label: ¿Qué quieres hacer?
+      description: Cuéntanos qué intentas lograr y dónde te atascaste.
+    validations:
+      required: true
+  - type: textarea
+    id: intentos
+    attributes:
+      label: ¿Qué has intentado?
+  - type: input
+    id: entorno
+    attributes:
+      label: Cómo lo usas
+      placeholder: App de escritorio en Windows 10, o bun run start, o desde el celular
