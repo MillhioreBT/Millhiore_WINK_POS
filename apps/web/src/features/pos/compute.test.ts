@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import type { Bootstrap } from "@millhiore/contracts"
 import {
   amountToSettle,
+  autoCharges,
   buildCart,
   type CartLine,
   changeIn,
@@ -27,6 +28,47 @@ const bootstrap = (taxpayer: "ordinary" | "special" | "none" = "special"): Boots
     receiptFooter: null,
   },
   terminals: [{ id: "t", code: "C1", name: "Caja 1", locationId: "l" }],
+  locations: [{ id: "l", name: "Tienda", kind: "store" }],
+  discountCodes: 0,
+  features: {
+    quotes: true,
+    priceLists: true,
+    charges: true,
+    recurring: true,
+    payables: true,
+    locations: false,
+    lots: false,
+  },
+  charges: [
+    {
+      id: "delivery",
+      name: "Delivery",
+      kind: "fixed",
+      rateBp: 0,
+      amountMinor: 200,
+      currency: "USD",
+      taxId: null,
+      auto: false,
+    },
+    {
+      id: "servicio",
+      name: "Servicio",
+      kind: "percent",
+      rateBp: 1000,
+      amountMinor: 0,
+      currency: null,
+      taxId: null,
+      auto: true,
+    },
+  ],
+  priceLists: [
+    {
+      id: "mayor",
+      name: "Al mayor",
+      adjustBp: -1000,
+      prices: [{ variantId: "own", priceMinor: 50, priceCurrency: "USD" }],
+    },
+  ],
   printer: { mode: "browser", paperWidth: 80, autoPrint: false, openDrawer: false },
   currencies: [
     { code: "USD", name: "Dólar", symbol: "$", decimals: 2 },
@@ -273,5 +315,72 @@ describe("descuentos en la caja", () => {
     const only = buildCart(ctx, lines, null)
     const both = buildCart(ctx, lines, { kind: "amount", amountMinor: 50000, currency: "VES" })
     expect(both.ticket.discountMinor).toBe(only.ticket.discountMinor + 50000)
+  })
+})
+
+describe("listas de precios en la caja", () => {
+  const line = (variantId: string): StoredLine => ({
+    variantId,
+    name: "Refresco",
+    qtyMilli: 1000,
+    priceMinor: 100,
+    priceCurrency: "USD",
+    taxId: null,
+  })
+
+  test("sin lista vale el precio normal; con lista, el propio o el ajuste de la lista", () => {
+    const normal = buildCart(ctx, [line("v"), line("own")], null)
+    expect(normal.lines.map((l) => l.unitPriceMinor)).toEqual([87790, 87790]) // 1 $ = 877,90 Bs
+    const mayor = buildCart(ctx, [line("v"), line("own")], null, "mayor")
+    // 1,00 $ − 10 % = 0,90 $ y el precio propio, 0,50 $.
+    expect(mayor.lines.map((l) => l.unitPriceMinor)).toEqual([79011, 43895])
+  })
+
+  test("una lista que ya no existe cae en el precio normal", () => {
+    const cart = buildCart(ctx, [line("v")], null, "borrada")
+    expect(cart.lines[0]?.unitPriceMinor).toBe(87790)
+  })
+
+  test("el descuento de la venta se calcula sobre los precios de la lista", () => {
+    const cart = buildCart(ctx, [line("v")], { kind: "percent", bp: 1000 }, "mayor")
+    expect(cart.ticket.discountMinor).toBe(7901)
+  })
+})
+
+describe("recargos en la caja", () => {
+  const line = (): StoredLine => ({
+    variantId: "v",
+    name: "Pan",
+    qtyMilli: 2000,
+    priceMinor: 150,
+    priceCurrency: "USD",
+    taxId: null,
+  })
+
+  test("el delivery sugerido se convierte a Bs y suma al total", () => {
+    const cart = buildCart(ctx, [line()], null, null, [{ chargeId: "delivery" }])
+    // 2 × 1,50 $ = 2.633,70 Bs; delivery 2 $ = 1.755,80 Bs.
+    expect(cart.ticket.charges.map((c) => [c.name, c.amountMinor])).toEqual([["Delivery", 175580]])
+    expect(cart.ticket.totalMinor).toBe(263370 + 175580)
+  })
+
+  test("el monto escrito manda sobre el sugerido", () => {
+    const cart = buildCart(ctx, [line()], null, null, [
+      { chargeId: "delivery", amount: { amountMinor: 50000, currency: "VES" } },
+    ])
+    expect(cart.ticket.charges[0]?.amountMinor).toBe(50000)
+  })
+
+  test("el servicio es un % del subtotal sin IVA, como en el servidor", () => {
+    const cart = buildCart(ctx, [line()], null, null, autoCharges(ctx))
+    const base = cart.ticket.charges[0]?.baseMinor ?? 0
+    expect(cart.ticket.charges[0]).toMatchObject({ name: "Servicio", rateBp: 1000 })
+    expect(cart.ticket.charges[0]?.amountMinor).toBe(Math.round(base / 10))
+    expect(base).toBe(227043) // 2.633,70 / 1,16
+  })
+
+  test("sin productos no hay recargos, y un recargo desconocido se ignora", () => {
+    expect(buildCart(ctx, [], null, null, [{ chargeId: "delivery" }]).ticket.totalMinor).toBe(0)
+    expect(buildCart(ctx, [line()], null, null, [{ chargeId: "nope" }]).ticket.charges).toEqual([])
   })
 })

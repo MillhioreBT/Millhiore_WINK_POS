@@ -1,8 +1,8 @@
-import type { CatalogItem } from "@millhiore/contracts"
+import type { CatalogItem, Contact } from "@millhiore/contracts"
 import { uuidv7 } from "@millhiore/domain"
 import { create } from "zustand"
 import { createJSONStorage, persist } from "zustand/middleware"
-import type { DiscountSpec } from "./compute"
+import type { DiscountSpec, TicketCharge } from "./compute"
 
 export interface TicketLine {
   variantId: string
@@ -14,6 +14,16 @@ export interface TicketLine {
   taxId: string | null
   /** Descuento dado a esta línea; exige el permiso de dar descuentos. */
   discount?: DiscountSpec | undefined
+  /** Precio congelado de una cotización: no le aplica la lista de precios. */
+  fixedPrice?: boolean | undefined
+}
+
+/** La cotización que se está vendiendo: la venta la deja convertida. */
+export interface PosQuote {
+  id: string
+  number: string
+  contact: Contact | null
+  validUntil: number
 }
 
 /** Un ticket aparcado mientras se atiende a otro cliente. */
@@ -22,6 +32,9 @@ export interface HeldTicket {
   heldAt: number
   lines: TicketLine[]
   saleDiscount?: DiscountSpec | null | undefined
+  priceListId?: string | null | undefined
+  charges?: TicketCharge[] | null | undefined
+  quote?: PosQuote | null | undefined
 }
 
 interface PosState {
@@ -33,7 +46,25 @@ interface PosState {
   lines: TicketLine[]
   /** Descuento a toda la venta (se reparte entre las líneas al cobrar). */
   saleDiscount: DiscountSpec | null
+  /** Lista de precios de la venta (al mayor…); null = precios normales. */
+  priceListId: string | null
+  /** Recargos elegidos (delivery, servicio…); null = los que se agregan solos. */
+  charges: TicketCharge[] | null
+  /** Cotización que se está vendiendo; null si la venta no sale de una. */
+  quote: PosQuote | null
   held: HeldTicket[]
+  /**
+   * Carga una cotización en la caja con sus precios congelados. Si había otra venta en curso,
+   * queda en espera.
+   */
+  loadQuote: (
+    quote: PosQuote,
+    ticket: { lines: TicketLine[]; saleDiscount: DiscountSpec | null; charges: TicketCharge[] },
+  ) => void
+  /** Deja de vender la cotización (la venta sigue como una normal). */
+  detachQuote: () => void
+  setPriceList: (priceListId: string | null) => void
+  setCharges: (charges: TicketCharge[]) => void
   setLineDiscount: (variantId: string, discount: DiscountSpec | null) => void
   setSaleDiscount: (discount: DiscountSpec | null) => void
   add: (item: CatalogItem, qtyMilli?: number) => void
@@ -55,6 +86,35 @@ export const usePos = create<PosState>()(
       saleId: uuidv7(),
       lines: [],
       saleDiscount: null,
+      priceListId: null,
+      charges: null,
+      quote: null,
+      loadQuote: (quote, ticket) =>
+        set((s) => ({
+          held: s.lines.length
+            ? [
+                ...s.held,
+                {
+                  saleId: s.saleId,
+                  heldAt: Date.now(),
+                  lines: s.lines,
+                  saleDiscount: s.saleDiscount,
+                  priceListId: s.priceListId,
+                  charges: s.charges,
+                  quote: s.quote,
+                },
+              ]
+            : s.held,
+          saleId: uuidv7(),
+          lines: ticket.lines,
+          saleDiscount: ticket.saleDiscount,
+          priceListId: null,
+          charges: ticket.charges,
+          quote,
+        })),
+      detachQuote: () => set({ quote: null }),
+      setPriceList: (priceListId) => set({ priceListId }),
+      setCharges: (charges) => set({ charges }),
       setLineDiscount: (variantId, discount) =>
         set((s) => ({
           lines: s.lines.map((l) => {
@@ -100,7 +160,15 @@ export const usePos = create<PosState>()(
           const lines = s.lines.filter((l) => l.variantId !== variantId)
           return { lines, ...(lines.length ? {} : { saleDiscount: null }) }
         }),
-      reset: () => set({ saleId: uuidv7(), lines: [], saleDiscount: null }),
+      reset: () =>
+        set({
+          saleId: uuidv7(),
+          lines: [],
+          saleDiscount: null,
+          priceListId: null,
+          charges: null,
+          quote: null,
+        }),
       held: [],
       hold: () =>
         set((s) =>
@@ -113,11 +181,17 @@ export const usePos = create<PosState>()(
                     heldAt: Date.now(),
                     lines: s.lines,
                     saleDiscount: s.saleDiscount,
+                    priceListId: s.priceListId,
+                    charges: s.charges,
+                    quote: s.quote,
                   },
                 ],
                 saleId: uuidv7(),
                 lines: [],
                 saleDiscount: null,
+                priceListId: null,
+                charges: null,
+                quote: null,
               }
             : {},
         ),
@@ -135,12 +209,18 @@ export const usePos = create<PosState>()(
                     heldAt: Date.now(),
                     lines: s.lines,
                     saleDiscount: s.saleDiscount,
+                    priceListId: s.priceListId,
+                    charges: s.charges,
+                    quote: s.quote,
                   },
                 ]
               : others,
             saleId: ticket.saleId,
             lines: ticket.lines,
             saleDiscount: ticket.saleDiscount ?? null,
+            priceListId: ticket.priceListId ?? null,
+            charges: ticket.charges ?? null,
+            quote: ticket.quote ?? null,
           }
         }),
       discardHeld: (saleId) => set((s) => ({ held: s.held.filter((t) => t.saleId !== saleId) })),

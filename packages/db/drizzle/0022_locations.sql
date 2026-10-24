@@ -1,0 +1,1 @@
+ALTER TABLE `document` ADD `to_location_id` text REFERENCES location(id);

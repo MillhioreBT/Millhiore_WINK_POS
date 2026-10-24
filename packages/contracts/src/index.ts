@@ -11,6 +11,8 @@ import { z } from "zod"
 
 const safeInt = z.number().int().safe()
 
+export const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha AAAA-MM-DD")
+
 export const uuidv7Schema = z.string().refine(isUuidv7, "Debe ser un UUIDv7")
 export const currencyCodeSchema = z
   .string()
@@ -31,6 +33,15 @@ export const postLineSchema = z.object({
   unitPriceMinor: safeInt.min(0),
   /** Descuento sobre la línea, en la moneda del documento; exige el permiso de dar descuentos. */
   discountMinor: safeInt.min(0).default(0),
+  /**
+   * Producto con lotes: el lote existente del que sale (ajuste, traslado) o al que entra (ajuste
+   * de entrada). Si falta, las salidas se reparten solas (primero el que vence antes).
+   */
+  lotId: z.string().min(1).optional(),
+  /** Producto con lotes: el lote nuevo que entra (compra, ajuste de entrada), con su vencimiento. */
+  lot: z
+    .object({ code: z.string().trim().max(40).nullish(), expiresOn: dateSchema.nullable() })
+    .optional(),
 })
 
 export const postPaymentSchema = z.object({
@@ -84,6 +95,28 @@ export const postDocumentSchema = z.object({
     .array(z.object({ saleDocumentId: z.string().min(1), amountMinor: safeInt.min(1) }))
     .max(200)
     .default([]),
+  /**
+   * Venta: recargos (delivery, servicio…). Uno fijo puede traer su monto en la moneda del
+   * documento (si falta, el sugerido); el porcentaje y el IVA los pone el servidor.
+   */
+  charges: z
+    .array(z.object({ chargeId: z.string().min(1), amountMinor: safeInt.min(0).optional() }))
+    .max(10)
+    .default([]),
+  /** Venta que sale de una cotización abierta: queda convertida en la misma operación. */
+  quoteId: z.string().min(1).nullish(),
+  /**
+   * Compra, ajuste o traslado: la ubicación cuya existencia cambia (en el traslado, el origen). Si
+   * falta, la de la caja; las ventas y devoluciones usan siempre la de su caja.
+   */
+  locationId: z.string().min(1).nullish(),
+  /** Traslado (`STOCK_TRANSFER`): adónde llega la mercancía. */
+  toLocationId: z.string().min(1).nullish(),
+  /**
+   * Venta: el código de descuento que se aplicó. Quien no puede dar descuentos a mano solo puede
+   * descontar, en total, lo que da el código.
+   */
+  discountCodeId: z.string().min(1).nullish(),
 })
 export type PostDocumentBody = z.infer<typeof postDocumentSchema>
 
@@ -220,12 +253,31 @@ export const catalogItemSchema = z.object({
   costCurrency: z.string().nullable(),
   /** Existencia total en milésimas (1000 = 1). */
   stockMilli: safeInt,
+  /** Existencia por ubicación (id → milésimas); faltan las ubicaciones donde nunca hubo. */
+  stockByLocation: z.record(z.string(), safeInt),
   /** Existencia mínima en milésimas; null = sin aviso de reposición. */
   minStockMilli: safeInt.nullable(),
   /** Categoría del producto; null = sin categoría. */
   categoryId: z.string().nullable(),
+  /** Lleva lotes con vencimiento. */
+  tracksLots: z.boolean(),
+  /**
+   * Producto con lotes: el próximo vencimiento de lo que hay (sin contar lo vencido) y cuánto hay
+   * vencido en cada ubicación; null si no lleva lotes.
+   */
+  expiry: z
+    .object({
+      nextExpiresOn: dateSchema.nullable(),
+      expiredByLocation: z.record(z.string(), safeInt),
+    })
+    .nullable(),
 })
 export type CatalogItem = z.infer<typeof catalogItemSchema>
+
+export const listPriceInputSchema = z.object({
+  priceListId: z.string().min(1),
+  priceMinor: safeInt.min(0, "El precio no puede ser negativo").nullable(),
+})
 
 export const createProductSchema = z.object({
   name: z.string().trim().min(1, "Escribe el nombre").max(120),
@@ -240,6 +292,10 @@ export const createProductSchema = z.object({
   minStockMilli: safeInt.min(0, "El mínimo no puede ser negativo").nullish(),
   /** null o ausente = sin categoría. */
   categoryId: z.string().min(1).nullish(),
+  /** Precio propio en cada lista (en la moneda del precio base); null = el de la lista. */
+  listPrices: z.array(listPriceInputSchema).max(50).optional(),
+  /** Lleva lotes con vencimiento (solo productos, no servicios). */
+  tracksLots: z.boolean().default(false),
 })
 export type CreateProductBody = z.infer<typeof createProductSchema>
 
@@ -253,6 +309,9 @@ export const updateProductSchema = z.object({
   minStockMilli: safeInt.min(0, "El mínimo no puede ser negativo").nullish(),
   categoryId: z.string().min(1).nullish(),
   active: z.boolean().optional(),
+  /** Las listas que no se mencionan no cambian. */
+  listPrices: z.array(listPriceInputSchema).max(50).optional(),
+  tracksLots: z.boolean().optional(),
 })
 export type UpdateProductBody = z.infer<typeof updateProductSchema>
 
@@ -270,6 +329,22 @@ export const paymentMethodInfoSchema = z.object({
 })
 export type PaymentMethodInfo = z.infer<typeof paymentMethodInfoSchema>
 
+export const saleChargeInfoSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  kind: z.enum(["percent", "fixed"]),
+  /** Porcentual: centésimas de punto sobre el subtotal sin IVA. */
+  rateBp: safeInt,
+  /** Fijo: monto sugerido en `currency`. */
+  amountMinor: safeInt,
+  currency: z.string().nullable(),
+  /** IVA del recargo; null = no lleva IVA. */
+  taxId: z.string().nullable(),
+  /** Se agrega solo a cada venta. */
+  auto: z.boolean(),
+})
+export type SaleChargeInfo = z.infer<typeof saleChargeInfoSchema>
+
 export const bootstrapSchema = z.object({
   business: z.object({
     name: z.string(),
@@ -282,8 +357,19 @@ export const bootstrapSchema = z.object({
     phone: z.string().nullable(),
     receiptFooter: z.string().nullable(),
   }),
+  /** Cajas activas: cada equipo elige en cuál trabaja (la primera si no eligió). */
   terminals: z.array(
     z.object({ id: z.string(), code: z.string(), name: z.string(), locationId: z.string() }),
+  ),
+  /** Cuántos códigos de descuento activos hay (la caja ofrece «Código de descuento» si hay). */
+  discountCodes: safeInt,
+  /** Ubicaciones activas (tienda, depósito, cocina…), la tienda primero. */
+  locations: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      kind: z.enum(["store", "warehouse", "kitchen"]),
+    }),
   ),
   currencies: z.array(
     z.object({ code: z.string(), name: z.string(), symbol: z.string(), decimals: safeInt }),
@@ -292,6 +378,29 @@ export const bootstrapSchema = z.object({
   taxes: z.array(taxSchema),
   fiscal: fiscalSettingsSchema,
   credit: z.object({ enabled: z.boolean() }),
+  /** Funciones que el comercio usa (las apagadas se esconden). */
+  features: z.object({
+    quotes: z.boolean(),
+    priceLists: z.boolean(),
+    charges: z.boolean(),
+    recurring: z.boolean(),
+    payables: z.boolean(),
+    locations: z.boolean(),
+    lots: z.boolean(),
+  }),
+  /** Recargos de venta activos (delivery, servicio…), en su orden. */
+  charges: z.array(saleChargeInfoSchema),
+  /** Listas de precios activas, en su orden, con los precios propios de cada producto. */
+  priceLists: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      adjustBp: safeInt,
+      prices: z.array(
+        z.object({ variantId: z.string(), priceMinor: safeInt, priceCurrency: z.string() }),
+      ),
+    }),
+  ),
   security: z.object({ autoLockMinutes: safeInt }),
   printer: printerSettingsSchema.pick({
     mode: true,
@@ -376,6 +485,8 @@ export const shiftReportSchema = shiftSchema.extend({
   expenses: z.object({ count: safeInt, totalLegalMinor: safeInt }),
   /** Pagos a proveedores hechos en el turno, netos de anulaciones (moneda legal). */
   supplierPayments: z.object({ count: safeInt, totalLegalMinor: safeInt }),
+  /** Devoluciones a proveedores del turno (lo reembolsado puede entrar a la gaveta). */
+  supplierReturns: z.object({ count: safeInt, totalLegalMinor: safeInt }),
   /** Cobrado por método (vuelto y anulaciones restados), en la moneda de cada método. */
   byMethod: z.array(
     z.object({
@@ -427,8 +538,6 @@ export const backupListSchema = z.object({
 export type BackupList = z.infer<typeof backupListSchema>
 
 // Informes
-
-export const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha AAAA-MM-DD")
 
 export const daySalesSchema = z.object({
   /** Ventas del día sin contar los reversos. */
@@ -489,6 +598,16 @@ export const daySummarySchema = z.object({
   expenses: z.object({ count: safeInt, totalLegalMinor: safeInt }),
   /** Abonos de clientes recibidos en el día, netos de anulaciones (moneda legal). */
   collections: z.object({ count: safeInt, totalLegalMinor: safeInt }),
+  /**
+   * Lo que costó la mercancía que salió por merma, vencido, uso interno… menos lo que entró por
+   * ajustes (moneda legal); null si quien consulta no ve costos.
+   */
+  inventoryLossLegalMinor: safeInt.nullable(),
+  /**
+   * Lotes que vencen dentro de los días de aviso y lotes ya vencidos con existencia; null si quien
+   * consulta no ve inventario o el comercio no usa lotes.
+   */
+  expiry: z.object({ alertDays: safeInt, expiringLots: safeInt, expiredLots: safeInt }).nullable(),
   /** Turnos abiertos ahora mismo. */
   openShifts: z.array(
     z.object({
@@ -553,8 +672,31 @@ export const documentSummarySchema = z.object({
   creditCurrency: z.string().nullable(),
   /** Plazo para pagar lo fiado; null si no tiene. */
   dueAt: safeInt.nullable(),
+  /** Caja en que se registró. */
+  terminalName: z.string(),
+  /** Ubicación cuya existencia movió (en un traslado, el origen). */
+  locationId: z.string(),
+  locationName: z.string(),
+  /** Traslado: adónde llegó la mercancía. */
+  toLocationId: z.string().nullable(),
+  toLocationName: z.string().nullable(),
+  /** Venta con código de descuento: el código. */
+  discountCode: z.string().nullable(),
 })
 export type DocumentSummary = z.infer<typeof documentSummarySchema>
+
+export const documentChargeSchema = z.object({
+  chargeId: z.string(),
+  name: z.string(),
+  kind: z.enum(["percent", "fixed"]),
+  rateBp: safeInt,
+  /** Porcentual: el subtotal sin IVA sobre el que se calculó. */
+  baseMinor: safeInt,
+  amountMinor: safeInt,
+  amountLegalMinor: safeInt,
+  taxId: z.string().nullable(),
+  taxRateBp: safeInt,
+})
 
 export const documentDetailSchema = documentSummarySchema.extend({
   rate: exchangeRateSchema.nullable(),
@@ -571,6 +713,15 @@ export const documentDetailSchema = documentSummarySchema.extend({
       lineTotalMinor: safeInt,
       taxId: z.string().nullable(),
       taxRateBp: safeInt,
+      /** Lotes que movió la línea (cantidades sin signo); vacío si el producto no lleva lotes. */
+      lots: z.array(
+        z.object({
+          lotId: z.string(),
+          code: z.string().nullable(),
+          expiresOn: dateSchema.nullable(),
+          qtyMilli: safeInt,
+        }),
+      ),
     }),
   ),
   payments: z.array(
@@ -586,6 +737,8 @@ export const documentDetailSchema = documentSummarySchema.extend({
   ),
   taxes: z.array(taxGroupSchema),
   surcharges: z.array(surchargeGroupSchema),
+  /** Venta: recargos (delivery, servicio…), ya sumados al total. */
+  charges: z.array(documentChargeSchema),
   /** Abono (`PAYMENT_IN`): las ventas a crédito que paga y cuánto de cada una. */
   allocations: z.array(
     z.object({ saleDocumentId: z.string(), saleNumber: z.string(), amountMinor: safeInt }),
@@ -744,6 +897,8 @@ export const contactSchema = z.object({
   creditDays: safeInt,
   /** Tope de lo que puede deber, en la moneda de referencia; null = sin tope. */
   creditLimitMinor: safeInt.nullable(),
+  /** Lista de precios con que compra; null = los precios base. */
+  priceListId: z.string().nullable(),
   active: z.boolean(),
   createdAt: safeInt,
 })
@@ -759,6 +914,7 @@ export const createContactSchema = z.object({
   notes: z.string().trim().max(500).nullish(),
   creditDays: safeInt.min(0).max(365).optional(),
   creditLimitMinor: safeInt.min(0).nullish(),
+  priceListId: z.string().min(1).nullish(),
 })
 export type CreateContactBody = z.infer<typeof createContactSchema>
 
@@ -788,6 +944,10 @@ export const openSaleSchema = z.object({
   outstandingMinor: safeInt,
   /** Pasó la fecha límite y sigue debiendo. */
   overdue: z.boolean(),
+  /** Una venta fiada o una deuda anotada a mano (un saldo anterior, un préstamo). */
+  kind: z.enum(["SALE", "DEBT_IN"]),
+  /** Qué es: «Venta», o lo que se anotó en la deuda. */
+  label: z.string(),
 })
 export type OpenSale = z.infer<typeof openSaleSchema>
 
@@ -836,8 +996,8 @@ export type Receivables = z.infer<typeof receivablesSchema>
 
 /** Una compra o un gasto a deber con saldo pendiente. */
 export const openPayableSchema = openSaleSchema.extend({
-  kind: z.enum(["PURCHASE", "EXPENSE"]),
-  /** Qué es: la descripción del gasto, o «Compra». */
+  kind: z.enum(["PURCHASE", "EXPENSE", "DEBT_OUT"]),
+  /** Qué es: la descripción del gasto o de la deuda, o «Compra». */
   label: z.string(),
   /** Número de la factura del proveedor, si se anotó. */
   externalRef: z.string().nullable(),
@@ -890,10 +1050,10 @@ export const statementSchema = z.object({
     z.object({
       id: z.string(),
       number: z.string(),
-      type: z.enum(["SALE", "PAYMENT_IN"]),
+      type: z.enum(["SALE", "PAYMENT_IN", "DEBT_IN"]),
       postedAt: safeInt,
       currency: z.string(),
-      /** Lo fiado (venta) o lo abonado (abono), en la moneda del documento. */
+      /** Lo fiado (venta o deuda) o lo abonado (abono), en la moneda en que se debe. */
       amountMinor: safeInt,
       /** Fue anulado: ya no cuenta. */
       voided: z.boolean(),
@@ -947,6 +1107,8 @@ export type SecuritySettings = z.infer<typeof securitySettingsSchema>
 
 /** Qué se puede devolver de una venta y con qué precio, descuento e IVA se vendió cada línea. */
 export const returnableSchema = z.object({
+  /** Una venta (la devuelve el cliente) o una compra (se le devuelve al proveedor). */
+  kind: z.enum(["SALE", "PURCHASE"]),
   documentId: z.string(),
   number: z.string(),
   currency: z.string(),
@@ -1068,6 +1230,38 @@ export const expenseBodySchema = z.object({
 })
 export type ExpenseBody = z.infer<typeof expenseBodySchema>
 
+// Deudas anotadas a mano
+
+/**
+ * Una deuda sin una venta, compra o gasto detrás: lo que un cliente ya debía antes de usar el
+ * sistema, lo que se le debe a un proveedor, o un préstamo. Se cobra o se paga como cualquier otra.
+ */
+export const debtBodySchema = z.object({
+  /** UUIDv7 del cliente: reintentar no anota dos veces la misma deuda. */
+  id: uuidv7Schema,
+  /** `DEBT_IN`: lo que un cliente le debe al negocio; `DEBT_OUT`: lo que el negocio le debe a un proveedor. */
+  type: z.enum(["DEBT_IN", "DEBT_OUT"]),
+  terminalId: z.string().min(1),
+  contactId: z.string().min(1, "Elige a quién"),
+  /** Moneda en que se debe: así se cobra o se paga después. */
+  currency: currencyCodeSchema,
+  /** Tasa vigente (para el monto en moneda legal si la deuda no es en bolívares). */
+  rate: exchangeRateSchema.nullable().default(null),
+  amountMinor: safeInt.min(1, "Escribe el monto"),
+  /** Qué es: «Saldo anterior», «Préstamo»… */
+  note: z.string().trim().max(500).nullish(),
+  /** Número de la factura o del pagaré, si lo hay. */
+  externalRef: z.string().trim().max(60).nullish(),
+  /** Hasta cuándo hay para pagar (ms); si falta, los días que tiene el contacto. */
+  dueAt: safeInt.nullish(),
+  /**
+   * Si fue un préstamo: de qué cuenta salió el dinero (a un cliente) o a cuál entró (de un
+   * proveedor), montos positivos que suman la deuda. Vacío si es un saldo de antes.
+   */
+  payments: z.array(postPaymentSchema).max(20).default([]),
+})
+export type DebtBody = z.infer<typeof debtBodySchema>
+
 // Gastos recurrentes
 
 export const recurrenceFrequencySchema = z.enum(RECURRENCE_FREQUENCIES)
@@ -1156,6 +1350,38 @@ export const accountSchema = z.object({
   methods: z.array(z.string()),
 })
 export type Account = z.infer<typeof accountSchema>
+
+const exposureFiguresSchema = z.object({
+  /** Lo que hay, en moneda legal. */
+  balanceMinor: safeInt,
+  /** Lo que valía en moneda de referencia cuando entró (promedio móvil a la tasa de cada día). */
+  basisMinor: safeInt,
+  /** Lo que vale hoy en moneda de referencia, a la tasa vigente. */
+  valueMinor: safeInt,
+  /** valueMinor − basisMinor: negativo si los bolívares se devaluaron mientras estaban guardados. */
+  differenceMinor: safeInt,
+})
+
+/**
+ * Exposición cambiaria de las cuentas en moneda legal. Informativa: no cambia ningún saldo. Sin
+ * tasa vigente no hay con qué compararlas (`rate: null` y ninguna cuenta).
+ */
+export const exchangeExposureSchema = z.object({
+  referenceCurrency: z.string(),
+  legalCurrency: z.string(),
+  rate: z.object({ value: z.string(), effectiveAt: safeInt }).nullable(),
+  /** Solo las cuentas en moneda legal con saldo. */
+  accounts: z.array(
+    exposureFiguresSchema.extend({
+      accountId: z.string(),
+      name: z.string(),
+      kind: accountKindSchema,
+      active: z.boolean(),
+    }),
+  ),
+  totals: exposureFiguresSchema,
+})
+export type ExchangeExposure = z.infer<typeof exchangeExposureSchema>
 
 export const createAccountSchema = z.object({
   name: z.string().trim().min(1, "Escribe el nombre").max(60),
@@ -1384,6 +1610,20 @@ export const salesReportSchema = z.object({
       profitLegalMinor: safeInt.nullable(),
     }),
   ),
+  /**
+   * Por categoría de producto (todas, no solo las más vendidas): lo vendido y, con costos, la
+   * utilidad. La utilidad sale vacía si algún producto de la categoría no tiene costo conocido.
+   */
+  byCategory: z.array(
+    z.object({
+      categoryId: z.string().nullable(),
+      name: z.string(),
+      products: safeInt,
+      totalLegalMinor: safeInt,
+      costLegalMinor: safeInt.nullable(),
+      profitLegalMinor: safeInt.nullable(),
+    }),
+  ),
   /** Cobrado por método, con la comisión que descontó el banco (moneda de cada método). */
   byMethod: z.array(
     z.object({
@@ -1396,6 +1636,58 @@ export const salesReportSchema = z.object({
   byUser: z.array(z.object({ name: z.string(), count: safeInt, totalLegalMinor: safeInt })),
 })
 export type SalesReport = z.infer<typeof salesReportSchema>
+
+/** Base e IVA de una alícuota en un renglón del libro, en moneda legal. */
+const taxBookGroupSchema = z.object({
+  /** `kind:rateBp`, la columna de `rates` a la que pertenece. */
+  key: z.string(),
+  baseLegalMinor: safeInt,
+  taxLegalMinor: safeInt,
+})
+
+export const taxBookQuerySchema = reportRangeQuerySchema.extend({
+  kind: z.enum(["sales", "purchases"]).default("sales"),
+})
+
+/**
+ * Libro de ventas o de compras: documento por documento, con la base y el IVA de cada alícuota.
+ * Informativo para el contador (las notas de venta no son facturas fiscales).
+ */
+export const taxBookSchema = z.object({
+  kind: z.enum(["sales", "purchases"]),
+  from: safeInt,
+  to: safeInt,
+  legalCurrency: z.string(),
+  /** Las alícuotas que aparecen en el período: una columna (base e IVA) cada una. */
+  rates: z.array(z.object({ key: z.string(), kind: z.enum(TAX_KINDS), rateBp: safeInt })),
+  rows: z.array(
+    z.object({
+      id: z.string(),
+      number: z.string(),
+      type: z.enum(["SALE", "RETURN", "PURCHASE", "PURCHASE_RETURN"]),
+      postedAt: safeInt,
+      /** Si es una anulación, el número del documento que anula. */
+      voids: z.string().nullable(),
+      /** Si es una devolución, el número de la venta (o compra) devuelta. */
+      returns: z.string().nullable(),
+      contactName: z.string().nullable(),
+      contactTaxId: z.string().nullable(),
+      /** Número de la factura del proveedor (compras). */
+      externalRef: z.string().nullable(),
+      /** Con signo: las devoluciones y anulaciones restan. */
+      totalLegalMinor: safeInt,
+      /** IGTF cobrado (ventas). */
+      surchargeLegalMinor: safeInt,
+      groups: z.array(taxBookGroupSchema),
+    }),
+  ),
+  totals: z.object({
+    totalLegalMinor: safeInt,
+    surchargeLegalMinor: safeInt,
+    groups: z.array(taxBookGroupSchema),
+  }),
+})
+export type TaxBook = z.infer<typeof taxBookSchema>
 
 export const inventoryReportSchema = z.object({
   legalCurrency: z.string(),
@@ -1427,3 +1719,431 @@ export const inventoryReportSchema = z.object({
   withoutCost: safeInt,
 })
 export type InventoryReport = z.infer<typeof inventoryReportSchema>
+
+// Cambio masivo de precios.
+
+export const priceRoundingSchema = z.enum(["none", "five", "ten", "unit"])
+export type PriceRounding = z.infer<typeof priceRoundingSchema>
+
+export const bulkPriceBodySchema = z
+  .object({
+    /** Solo estos productos (p. ej. los filtrados en pantalla). */
+    variantIds: z.array(z.string().min(1)).min(1).max(5000).optional(),
+    /** Solo los de esta categoría; "none" = los que no tienen. */
+    categoryId: z.string().min(1).optional(),
+    /**
+     * percent: sube (o baja, si es negativo) el precio de hoy en ese porcentaje.
+     * markup: precio = costo × (1 + ganancia), más el IVA si los precios lo incluyen.
+     */
+    mode: z.enum(["percent", "markup"]),
+    /** En centésimas de punto: 1000 = 10 %. */
+    valueBp: safeInt.min(-9_900).max(1_000_000),
+    /** A qué se redondea el precio nuevo (al más cercano): céntimo, 5 o 10 céntimos, o unidad. */
+    rounding: priceRoundingSchema,
+    /** false: solo calcula los cambios; true: los guarda. */
+    apply: z.boolean(),
+  })
+  .refine((b) => b.mode === "percent" || b.valueBp >= 0, {
+    path: ["valueBp"],
+    message: "La ganancia sobre el costo no puede ser negativa",
+  })
+  .refine((b) => b.valueBp !== 0 || b.mode === "markup" || b.rounding !== "none", {
+    path: ["valueBp"],
+    message: "Escribe un porcentaje distinto de cero",
+  })
+export type BulkPriceBody = z.infer<typeof bulkPriceBodySchema>
+
+export const bulkPriceResultSchema = z.object({
+  applied: z.boolean(),
+  /** Productos que cambian de precio, los que quedan igual y los que no se pudieron calcular. */
+  changed: safeInt,
+  unchanged: safeInt,
+  skipped: safeInt,
+  /** Sin costo de compra o sin tasa para llevar el costo a la moneda del precio. */
+  skippedNoCost: safeInt,
+  skippedNoRate: safeInt,
+  /** Los primeros 500 cambios, por nombre. */
+  changes: z.array(
+    z.object({
+      productId: z.string(),
+      variantId: z.string(),
+      name: z.string(),
+      sku: z.string(),
+      currency: z.string(),
+      beforeMinor: safeInt,
+      afterMinor: safeInt,
+    }),
+  ),
+})
+export type BulkPriceResult = z.infer<typeof bulkPriceResultSchema>
+
+// Listas de precios
+
+export const priceListSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  /** % sobre el precio base para los productos sin precio propio (−1000 = 10 % menos). */
+  adjustBp: safeInt,
+  position: safeInt,
+  active: z.boolean(),
+  /** Productos con precio propio en la lista y clientes que compran con ella. */
+  priceCount: safeInt,
+  customerCount: safeInt,
+})
+export type PriceList = z.infer<typeof priceListSchema>
+
+export const createPriceListSchema = z.object({
+  name: z.string().trim().min(1, "Escribe el nombre").max(60),
+  adjustBp: safeInt.min(-9_900, "No se puede bajar el 100 %").max(1_000_000).default(0),
+})
+export type CreatePriceListBody = z.infer<typeof createPriceListSchema>
+
+export const updatePriceListSchema = z.object({
+  name: z.string().trim().min(1).max(60).optional(),
+  adjustBp: safeInt.min(-9_900).max(1_000_000).optional(),
+  position: safeInt.min(0).optional(),
+  active: z.boolean().optional(),
+})
+export type UpdatePriceListBody = z.infer<typeof updatePriceListSchema>
+
+// Recargos de venta (delivery, servicio…)
+
+export const saleChargeSchema = saleChargeInfoSchema.extend({
+  position: safeInt,
+  active: z.boolean(),
+})
+export type SaleCharge = z.infer<typeof saleChargeSchema>
+
+export const createSaleChargeSchema = z
+  .object({
+    name: z.string().trim().min(1, "Escribe el nombre").max(60),
+    kind: z.enum(["percent", "fixed"]),
+    rateBp: safeInt.min(0).max(10_000).default(0),
+    amountMinor: safeInt.min(0).default(0),
+    currency: currencyCodeSchema.nullish(),
+    taxId: z.string().min(1).nullish(),
+    auto: z.boolean().default(false),
+  })
+  .refine((b) => b.kind !== "percent" || b.rateBp > 0, {
+    path: ["rateBp"],
+    message: "Escribe el porcentaje",
+  })
+  .refine((b) => b.kind !== "fixed" || !!b.currency, {
+    path: ["currency"],
+    message: "Elige la moneda del monto",
+  })
+export type CreateSaleChargeBody = z.infer<typeof createSaleChargeSchema>
+
+export const updateSaleChargeSchema = z.object({
+  name: z.string().trim().min(1).max(60).optional(),
+  rateBp: safeInt.min(1).max(10_000).optional(),
+  amountMinor: safeInt.min(0).optional(),
+  currency: currencyCodeSchema.optional(),
+  taxId: z.string().min(1).nullish(),
+  auto: z.boolean().optional(),
+  position: safeInt.min(0).optional(),
+  active: z.boolean().optional(),
+})
+export type UpdateSaleChargeBody = z.infer<typeof updateSaleChargeSchema>
+
+// Cotizaciones
+
+/** Un descuento como en la caja: % (centésimas de punto) o un monto en una moneda. */
+export const discountSpecSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("percent"), bp: safeInt.min(1).max(10_000) }),
+  z.object({
+    kind: z.literal("amount"),
+    amountMinor: safeInt.min(1),
+    currency: currencyCodeSchema,
+  }),
+])
+
+export const quoteChargeSchema = z.object({
+  chargeId: z.string().min(1),
+  amount: z.object({ amountMinor: safeInt.min(0), currency: currencyCodeSchema }).optional(),
+})
+
+export const quoteLineInputSchema = z.object({
+  variantId: z.string().min(1),
+  qtyMilli: safeInt.min(1, "La cantidad debe ser positiva"),
+  /** Precio cotizado (ya con la lista de precios, si había), en su moneda. */
+  priceMinor: safeInt.min(0),
+  priceCurrency: currencyCodeSchema,
+  discount: discountSpecSchema.nullish(),
+})
+
+export const createQuoteSchema = z.object({
+  id: uuidv7Schema,
+  contactId: z.string().min(1).nullish(),
+  /** Días que valen los precios (0 = solo hoy). */
+  validDays: safeInt.min(0).max(365).default(7),
+  note: z.string().trim().max(500).nullish(),
+  lines: z.array(quoteLineInputSchema).min(1, "La cotización no tiene productos").max(200),
+  saleDiscount: discountSpecSchema.nullish(),
+  charges: z.array(quoteChargeSchema).max(10).default([]),
+  /** Lo que vale hoy (lo calcula la caja): en moneda legal, en la de referencia y la tasa. */
+  totalLegalMinor: safeInt.min(0),
+  totalRefMinor: safeInt.min(0).nullable(),
+  rateValue: z.string().nullable(),
+})
+export type CreateQuoteBody = z.infer<typeof createQuoteSchema>
+
+export const quoteStatusSchema = z.enum(["open", "converted", "cancelled"])
+
+export const quoteSummarySchema = z.object({
+  id: z.string(),
+  number: z.string(),
+  status: quoteStatusSchema,
+  contactId: z.string().nullable(),
+  contactName: z.string().nullable(),
+  contactPhone: z.string().nullable(),
+  validUntil: safeInt,
+  totalLegalMinor: safeInt,
+  totalRefMinor: safeInt.nullable(),
+  rateValue: z.string().nullable(),
+  lineCount: safeInt,
+  note: z.string().nullable(),
+  createdBy: z.string().nullable(),
+  createdAt: safeInt,
+  closedAt: safeInt.nullable(),
+  /** La venta en que se convirtió. */
+  documentId: z.string().nullable(),
+  documentNumber: z.string().nullable(),
+})
+export type QuoteSummary = z.infer<typeof quoteSummarySchema>
+
+export const quoteDetailSchema = quoteSummarySchema.extend({
+  lines: z.array(
+    quoteLineInputSchema.extend({
+      lineNo: safeInt,
+      name: z.string(),
+      /** IVA del producto hoy (null = el por defecto), para volver a armar el ticket. */
+      taxId: z.string().nullable(),
+      /** El producto sigue a la venta. */
+      active: z.boolean(),
+    }),
+  ),
+  saleDiscount: discountSpecSchema.nullable(),
+  charges: z.array(quoteChargeSchema),
+  /** El cliente completo (para cobrarle: su lista, su crédito). */
+  contact: contactSchema.nullable(),
+})
+export type QuoteDetail = z.infer<typeof quoteDetailSchema>
+
+// Importación desde Excel
+
+export const importCellSchema = z.union([z.string().max(1000), z.number(), z.null()])
+
+export const importBodySchema = z.object({
+  /** Cada fila con su número en el archivo (para los avisos) y sus valores por campo. */
+  rows: z
+    .array(z.object({ row: safeInt.min(1), values: z.record(z.string(), importCellSchema) }))
+    .min(1, "El archivo no tiene filas")
+    .max(5000, "Como máximo 5.000 filas por archivo"),
+  /** Si un producto o contacto ya existe: actualizarlo (true) u omitir la fila (false). */
+  updateExisting: z.boolean().default(false),
+  /** false: solo revisa y cuenta; true: guarda las filas válidas. */
+  apply: z.boolean(),
+})
+export type ImportBody = z.infer<typeof importBodySchema>
+
+export const importResultSchema = z.object({
+  applied: z.boolean(),
+  created: safeInt,
+  updated: safeInt,
+  skipped: safeInt,
+  errors: safeInt,
+  rows: z.array(
+    z.object({
+      row: safeInt,
+      name: z.string(),
+      status: z.enum(["create", "update", "skip", "error"]),
+      messages: z.array(z.string()),
+    }),
+  ),
+  /** Categorías que se crean al importar productos. */
+  newCategories: z.array(z.string()),
+  /** Ajuste de inventario con la existencia inicial; null si no hubo. */
+  stockDocumentNumber: z.string().nullable(),
+  /** Saldos pendientes que se anotan (contactos): uno por contacto nuevo con saldo. */
+  debts: safeInt,
+})
+export type ImportResult = z.infer<typeof importResultSchema>
+
+// Funciones activables y guía para arrancar
+
+/** Lo que cada comercio puede apagar si no lo usa: se esconde del menú y de la caja. */
+export const featuresSchema = z.object({
+  quotes: z.boolean(),
+  priceLists: z.boolean(),
+  charges: z.boolean(),
+  recurring: z.boolean(),
+  payables: z.boolean(),
+  /** Varias ubicaciones (depósito, otra tienda), varias cajas y traslados. */
+  locations: z.boolean(),
+  /** Lotes con fecha de vencimiento en los productos perecederos. */
+  lots: z.boolean(),
+})
+export type Features = z.infer<typeof featuresSchema>
+
+export const updateFeaturesSchema = featuresSchema.partial()
+
+export const onboardingSchema = z.object({
+  dismissed: z.boolean(),
+  steps: z.array(
+    z.object({
+      id: z.enum(["business", "rate", "products", "users", "printer", "features", "sale"]),
+      done: z.boolean(),
+    }),
+  ),
+})
+export type Onboarding = z.infer<typeof onboardingSchema>
+
+// Ubicaciones y cajas
+
+export const locationKindSchema = z.enum(["store", "warehouse", "kitchen"])
+export type LocationKind = z.infer<typeof locationKindSchema>
+
+/** Donde se guarda la mercancía: la tienda, el depósito, la cocina, otra tienda. */
+export const stockLocationSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  kind: locationKindSchema,
+  active: z.boolean(),
+  /** Productos con existencia distinta de cero en esta ubicación. */
+  productsInStock: safeInt,
+})
+export type StockLocation = z.infer<typeof stockLocationSchema>
+
+export const createLocationSchema = z.object({
+  name: z.string().trim().min(1).max(60),
+  kind: locationKindSchema,
+})
+export type CreateLocationBody = z.infer<typeof createLocationSchema>
+
+export const updateLocationSchema = createLocationSchema
+  .partial()
+  .extend({ active: z.boolean().optional() })
+export type UpdateLocationBody = z.infer<typeof updateLocationSchema>
+
+/** Una caja: vende de la existencia de su ubicación y cuenta su propia gaveta en cada turno. */
+export const terminalSchema = z.object({
+  id: z.string(),
+  /** Prefijo de sus documentos: C2 → C2-000001. No cambia. */
+  code: z.string(),
+  name: z.string(),
+  locationId: z.string(),
+  locationName: z.string(),
+  active: z.boolean(),
+  /** Si tiene un turno abierto. */
+  shiftOpen: z.boolean(),
+})
+export type TerminalInfo = z.infer<typeof terminalSchema>
+
+export const createTerminalSchema = z.object({
+  name: z.string().trim().min(1).max(60),
+  locationId: z.string().min(1),
+  /** Prefijo de sus documentos; si falta, el siguiente libre (C2, C3…). */
+  code: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9]{1,6}$/, "Hasta 6 letras o números, sin espacios")
+    .optional(),
+})
+export type CreateTerminalBody = z.infer<typeof createTerminalSchema>
+
+export const updateTerminalSchema = z.object({
+  name: z.string().trim().min(1).max(60).optional(),
+  locationId: z.string().min(1).optional(),
+  active: z.boolean().optional(),
+})
+export type UpdateTerminalBody = z.infer<typeof updateTerminalSchema>
+
+// Lotes con vencimiento
+
+/** Lo que hay de un lote en una ubicación. */
+export const lotRowSchema = z.object({
+  lotId: z.string(),
+  variantId: z.string(),
+  productName: z.string(),
+  sku: z.string(),
+  code: z.string().nullable(),
+  expiresOn: dateSchema.nullable(),
+  /** Días que le quedan (0 = vence hoy, negativo = vencido); null sin fecha. */
+  daysLeft: safeInt.nullable(),
+  locationId: z.string(),
+  locationName: z.string(),
+  qtyMilli: safeInt,
+  /** El documento con que entró. */
+  documentId: z.string(),
+  documentNumber: z.string(),
+  createdAt: safeInt,
+})
+export type LotRow = z.infer<typeof lotRowSchema>
+
+export const lotsSchema = z.object({
+  /** Hoy en la zona del negocio (AAAA-MM-DD). */
+  today: dateSchema,
+  /** Con cuántos días de anticipación se avisa. */
+  alertDays: safeInt,
+  rows: z.array(lotRowSchema),
+})
+export type Lots = z.infer<typeof lotsSchema>
+
+export const updateLotSchema = z.object({
+  code: z.string().trim().max(40).nullable().optional(),
+  expiresOn: dateSchema.nullable().optional(),
+})
+export type UpdateLotBody = z.infer<typeof updateLotSchema>
+
+export const lotSettingsSchema = z.object({
+  /** Avisar de los lotes que vencen dentro de estos días. */
+  alertDays: z.number().int().min(1).max(365),
+})
+export type LotSettings = z.infer<typeof lotSettingsSchema>
+
+// Códigos de descuento
+
+export const discountCodeSchema = z.object({
+  id: z.string(),
+  code: z.string(),
+  kind: z.enum(["percent", "amount"]),
+  /** Porcentaje en centésimas de punto (1000 = 10 %). */
+  rateBp: safeInt,
+  amountMinor: safeInt,
+  currency: z.string().nullable(),
+  maxUses: safeInt.nullable(),
+  validFrom: dateSchema.nullable(),
+  validUntil: dateSchema.nullable(),
+  note: z.string().nullable(),
+  active: z.boolean(),
+  /** Ventas vigentes que lo usaron (las anuladas no cuentan). */
+  uses: safeInt,
+})
+export type DiscountCode = z.infer<typeof discountCodeSchema>
+
+const discountCodeFields = {
+  code: z
+    .string()
+    .trim()
+    .min(2, "Al menos 2 caracteres")
+    .max(30)
+    .regex(/^[A-Za-z0-9_-]+$/, "Solo letras, números, guion y guion bajo"),
+  kind: z.enum(["percent", "amount"]),
+  rateBp: safeInt.min(1).max(10_000).optional(),
+  amountMinor: safeInt.min(1).optional(),
+  currency: currencyCodeSchema.optional(),
+  maxUses: safeInt.min(1).nullish(),
+  validFrom: dateSchema.nullish(),
+  validUntil: dateSchema.nullish(),
+  note: z.string().trim().max(200).nullish(),
+}
+
+export const createDiscountCodeSchema = z.object(discountCodeFields)
+export type CreateDiscountCodeBody = z.infer<typeof createDiscountCodeSchema>
+
+export const updateDiscountCodeSchema = z
+  .object(discountCodeFields)
+  .partial()
+  .extend({ active: z.boolean().optional() })
+export type UpdateDiscountCodeBody = z.infer<typeof updateDiscountCodeSchema>

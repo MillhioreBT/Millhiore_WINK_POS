@@ -17,7 +17,7 @@ import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
 import { postDocument, voidDocument } from "../../posting"
 import { postingContext } from "../settings/service"
-import { postReturn, returnableOf } from "./returns"
+import { documentType, postReturn, returnableOf } from "./returns"
 import { getDocument, isDocumentType, listDocuments } from "./service"
 
 const errors = {
@@ -76,7 +76,7 @@ const returnableRoute = createRoute({
   method: "get",
   path: "/api/documents/{id}/returnable",
   tags: ["Documentos"],
-  summary: "Qué se puede devolver de una venta",
+  summary: "Qué se puede devolver de una venta o una compra",
   request: { params: z.object({ id: z.string().min(1) }) },
   responses: {
     200: {
@@ -93,9 +93,9 @@ const returnRoute = createRoute({
   method: "post",
   path: "/api/documents/{id}/return",
   tags: ["Documentos"],
-  summary: "Devuelve parte de una venta",
+  summary: "Devuelve parte de una venta (o de una compra, al proveedor)",
   description:
-    "El servidor usa el precio, el descuento y el IVA con que se vendió cada línea. El dinero sale por los métodos indicados o se descuenta de la deuda de la venta. Idempotente por `id`.",
+    "El servidor usa el precio, el descuento y el IVA con que se vendió (o compró) cada línea. El dinero se mueve por los métodos indicados o se descuenta de la deuda del documento. Idempotente por `id`.",
   request: {
     params: z.object({ id: z.string().min(1) }),
     body: { content: { "application/json": { schema: returnBodySchema } }, required: true },
@@ -191,9 +191,14 @@ export function registerDocumentRoutes(app: App, deps: AppDeps): void {
 
   app.openapi(postRoute, (c) => {
     const body = c.req.valid("json")
-    // Una devolución no se arma desde la caja: parte de una venta (POST /api/documents/{id}/return).
-    if (body.type === "RETURN") {
-      throw new HttpError(422, "UNSUPPORTED_TYPE", "Las devoluciones se hacen desde la venta")
+    // Una devolución no se arma desde la caja: parte de una venta o una compra
+    // (POST /api/documents/{id}/return).
+    if (body.type === "RETURN" || body.type === "PURCHASE_RETURN") {
+      throw new HttpError(
+        422,
+        "UNSUPPORTED_TYPE",
+        "Las devoluciones se hacen desde la venta o la compra",
+      )
     }
     if (body.type === "EXPENSE") {
       throw new HttpError(422, "UNSUPPORTED_TYPE", "Los gastos se registran en /api/expenses")
@@ -201,24 +206,39 @@ export function registerDocumentRoutes(app: App, deps: AppDeps): void {
     if (body.type === "TRANSFER") {
       throw new HttpError(422, "UNSUPPORTED_TYPE", "Las transferencias se hacen en /api/transfers")
     }
+    if (body.type === "DEBT_IN" || body.type === "DEBT_OUT") {
+      throw new HttpError(422, "UNSUPPORTED_TYPE", "Las deudas se anotan en /api/debts")
+    }
     const permission = permissionToPost(body.type)
     if (!permission) throw new HttpError(422, "UNSUPPORTED_TYPE", `Tipo no soportado: ${body.type}`)
     const actor = requirePermission(c, permission)
     // Fiar es una decisión aparte de vender: quien no puede fiar cobra todo en el momento.
     if (body.creditMinor > 0 && body.type === "SALE") requirePermission(c, "sale.credit")
-    // Lo mismo con los descuentos: quien no puede darlos cobra el precio de lista.
-    if (body.lines.some((l) => l.discountMinor > 0)) requirePermission(c, "sale.discount")
-    const result = postDocument(deps.db, body, context(actor.userId))
+    // Lo mismo con los descuentos: quien no puede darlos cobra el precio de lista, salvo lo que
+    // dé un código de descuento (el motor verifica que no pase de ahí).
+    const discounts = body.lines.some((l) => l.discountMinor > 0)
+    const canDiscount = actor.permissions.has("sale.discount")
+    if (discounts && !canDiscount && !body.discountCodeId) requirePermission(c, "sale.discount")
+    const result = postDocument(
+      deps.db,
+      { ...body, discountFromCodeOnly: !canDiscount },
+      context(actor.userId),
+    )
     return result.duplicate ? c.json(result, 200) : c.json(result, 201)
   })
 
+  // Devolver lo de una venta pide poder anular ventas; devolverle al proveedor, poder anular compras.
+  const returnPermission = (id: string) =>
+    documentType(deps.db, id) === "PURCHASE" ? "purchase.void" : "sale.void"
+
   app.openapi(returnableRoute, (c) => {
-    requirePermission(c, "sale.void")
-    return c.json(returnableOf(deps.db, c.req.valid("param").id), 200)
+    const { id } = c.req.valid("param")
+    requirePermission(c, returnPermission(id))
+    return c.json(returnableOf(deps.db, id), 200)
   })
 
   app.openapi(returnRoute, (c) => {
-    const actor = requirePermission(c, "sale.void")
+    const actor = requirePermission(c, returnPermission(c.req.valid("param").id))
     const result = postReturn(
       deps.db,
       c.req.valid("param").id,

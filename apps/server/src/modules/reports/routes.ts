@@ -7,12 +7,15 @@ import {
   reportRangeQuerySchema,
   resultsReportSchema,
   salesReportSchema,
+  taxBookQuerySchema,
+  taxBookSchema,
 } from "@millhiore/contracts"
 import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
 import { inventoryReport, resultsReport, salesReport } from "./period"
 import { daySummary } from "./service"
+import { taxBook } from "./taxBook"
 
 const err = { content: { "application/json": { schema: apiErrorSchema } } }
 
@@ -67,13 +70,28 @@ const salesRoute = createRoute({
   },
 })
 
+const taxBookRoute = createRoute({
+  method: "get",
+  path: "/api/reports/tax-book",
+  tags: ["Informes"],
+  summary: "Libro de ventas o de compras con el IVA",
+  description:
+    "Documento por documento (`kind=sales`: ventas, devoluciones y anulaciones; `kind=purchases`: compras y anulaciones), con la base y el IVA de cada alícuota y el IGTF, en moneda legal. Informativo para el contador: las notas de venta no son facturas fiscales y los gastos no entran (se guardan sin separar el IVA).",
+  request: { query: taxBookQuerySchema },
+  responses: {
+    200: { description: "Libro", content: { "application/json": { schema: taxBookSchema } } },
+    ...rangeResponses,
+  },
+})
+
 const inventoryRoute = createRoute({
   method: "get",
   path: "/api/reports/inventory",
   tags: ["Informes"],
   summary: "Inventario valorado",
   description:
-    "Existencia, costo y valor de cada producto que lleva inventario, a costo y a precio de venta, en moneda legal a la tasa vigente.",
+    "Existencia, costo y valor de cada producto que lleva inventario, a costo y a precio de venta, en moneda legal a la tasa vigente. Con `locationId`, solo lo que hay en esa ubicación.",
+  request: { query: z.object({ locationId: z.string().min(1).optional() }) },
   responses: {
     200: {
       description: "Inventario",
@@ -112,13 +130,24 @@ export function registerReportRoutes(app: App, deps: AppDeps): void {
     )
   })
 
+  app.openapi(taxBookRoute, (c) => {
+    requirePermission(c, "report.view")
+    const { from, to, kind } = c.req.valid("query")
+    checkRange(from, to)
+    return c.json(taxBook(deps.db, { kind, from, to }), 200)
+  })
+
   app.openapi(inventoryRoute, (c) => {
     const actor = actorOf(c)
     if (!(actor.permissions.has("report.view") || actor.permissions.has("inventory.view"))) {
       throw new HttpError(403, "FORBIDDEN", "Falta el permiso report.view")
     }
     return c.json(
-      inventoryReport(deps.db, { now: deps.now(), seeCost: actor.permissions.has("cost.view") }),
+      inventoryReport(deps.db, {
+        now: deps.now(),
+        seeCost: actor.permissions.has("cost.view"),
+        locationId: c.req.valid("query").locationId,
+      }),
       200,
     )
   })
@@ -130,6 +159,7 @@ export function registerReportRoutes(app: App, deps: AppDeps): void {
         date: c.req.valid("query").date,
         now: deps.now(),
         includeStock: actor.permissions.has("inventory.view"),
+        seeCost: actor.permissions.has("cost.view"),
       }),
       200,
     )

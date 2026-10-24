@@ -1,8 +1,10 @@
 import { Button } from "@millhiore/ui"
 import { FileSpreadsheetIcon, PrinterIcon } from "lucide-react"
-import { useState } from "react"
+import { type ReactNode, useState } from "react"
 import { toast } from "sonner"
 import { errorMessage } from "../../lib/api"
+import { formatPercent } from "../../lib/format"
+import { changeBp } from "./compare"
 
 /**
  * Imprime el informe en una hoja normal y en claro (uno oscuro gasta tinta y se lee peor). La hoja
@@ -83,6 +85,53 @@ export function PrintHeader({
   )
 }
 
+/** Con qué período se compara y cómo se muestra lo de entonces. */
+export interface Comparison {
+  bounds: { from: number; to: number }
+  /** «el mes anterior», «los 7 días anteriores»… */
+  label: string
+  /** Las fechas del período anterior, para el Excel y la impresión. */
+  period: string
+}
+
+/**
+ * Cuánto cambió contra el período anterior: ▲ 12 % en verde si es bueno (más ventas, menos
+ * gastos) y en rojo si no. Al pasar el puntero se ve lo de antes.
+ */
+export function Delta({
+  current,
+  previous,
+  upIsGood = true,
+  format,
+}: {
+  current: number | null
+  previous: number | null | undefined
+  upIsGood?: boolean
+  format: (value: number) => string
+}) {
+  if (current === null || previous === null || previous === undefined) return null
+  const title = `Antes: ${format(previous)}`
+  const bp = changeBp(current, previous)
+  // Antes no había nada con qué comparar: sin flecha.
+  if (bp === null) return null
+  if (bp === 0) {
+    return (
+      <span className="text-muted-foreground text-xs" title={title}>
+        igual
+      </span>
+    )
+  }
+  // Sin decimales de más: «▲ 12 %», y uno solo por debajo de 10 % («▼ 3,5 %»).
+  const shown = Math.abs(bp) >= 1000 ? Math.round(bp / 100) * 100 : Math.round(bp / 10) * 10
+  const good = bp > 0 === upIsGood
+  return (
+    <span className={`tabular text-xs ${good ? "text-success" : "text-destructive"}`} title={title}>
+      <span aria-hidden>{bp > 0 ? "▲" : "▼"}</span>
+      <span className="sr-only">{bp > 0 ? "Subió" : "Bajó"}</span> {formatPercent(Math.abs(shown))}
+    </span>
+  )
+}
+
 /** Una línea de un estado: concepto a la izquierda y monto a la derecha. */
 export function Line({
   label,
@@ -92,6 +141,7 @@ export function Line({
   muted,
   indent,
   negative,
+  delta,
 }: {
   label: string
   value: string
@@ -100,6 +150,8 @@ export function Line({
   muted?: boolean
   indent?: boolean
   negative?: boolean
+  /** La variación contra el período anterior, debajo del monto. */
+  delta?: ReactNode
 }) {
   return (
     <div
@@ -111,7 +163,10 @@ export function Line({
           <span className="block font-normal text-muted-foreground text-xs">{hint}</span>
         ) : null}
       </span>
-      <span className={`tabular shrink-0 ${negative ? "text-destructive" : ""}`}>{value}</span>
+      <span className="grid shrink-0 justify-items-end">
+        <span className={`tabular ${negative ? "text-destructive" : ""}`}>{value}</span>
+        {delta}
+      </span>
     </div>
   )
 }

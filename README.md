@@ -6,7 +6,7 @@
 
 Sistema administrativo y punto de venta **libre y autohospedado** para comercios en Venezuela: corre en una PC del negocio y se usa desde el navegador de esa PC, de otras computadoras o de los celulares de la misma red. Funciona sin internet y los datos quedan en tu equipo. Plan completo en [PLAN.md](PLAN.md).
 
-> Estado: **en desarrollo, todavía sin versión publicada**. La fase 1 (MVP bodega/tienda) está completa en el código y la fase 2 (paridad de gestión) está en curso. Aún no se ha probado en un negocio real: falta el piloto.
+> Estado: **en desarrollo, todavía sin versión publicada**. Las fases 1 (MVP bodega/tienda) y 2 (paridad de gestión) están completas en el código. Aún no se ha probado en un negocio real: falta el piloto.
 
 **Contenido:** [Qué hace hoy](#qué-hace-hoy) · [Qué falta](#qué-falta) · [Probarlo](#probarlo) · [Usuarios](#usuarios-y-contraseñas) · [App de escritorio](#app-de-escritorio-windows) · [Desarrollo](#desarrollo) · [Configuración](#configuración-variables-de-entorno) · [Contribuir](#contribuir) · [Seguridad](#seguridad)
 
@@ -14,18 +14,18 @@ Cada comercio configura lo suyo desde la aplicación: nombre, RIF, dirección, t
 
 ## Qué hace hoy
 
-- **Caja:** búsqueda y lector de códigos sin tocar el teclado, categorías, pagos mixtos en dólares y bolívares, vuelto en otra moneda o método, descuentos por producto o por toda la venta (con permiso), IVA e IGTF, ventas en espera, recibo e impresión automática.
+- **Caja:** búsqueda y lector de códigos sin tocar el teclado, categorías, pagos mixtos en dólares y bolívares, vuelto en otra moneda o método, descuentos por producto o por toda la venta (con permiso) y códigos de descuento (PROMO10) que usa cualquier cajero, escaneo con la cámara del celular, IVA e IGTF, ventas en espera, recibo e impresión automática.
 - **Turnos:** apertura, ingresos y retiros de efectivo, y cierre con arqueo por billete y reporte de diferencias.
-- **Productos y compras:** categorías, existencia, existencia mínima con aviso, ajustes y compras a proveedores.
-- **Ventas:** historial, recibo, anulación con documento de reverso y devolución parcial: el cliente devuelve parte de lo que llevó y se le reembolsa el dinero o se descuenta de lo que debe.
-- **Fiado:** se deja a deber el resto de una venta a un cliente registrado, con días para pagar y límite de deuda por cliente. La deuda va en dólares aunque la factura sea en bolívares. Hay una pantalla con lo que debe cada cliente, su estado de cuenta y el cobro de abonos (en cualquier método y moneda), con recordatorio por WhatsApp. Se puede desactivar en Ajustes.
+- **Productos y compras:** categorías, existencia, existencia mínima con aviso, ajustes y compras a proveedores, y devoluciones al proveedor (reembolsa o se descuenta de lo que se le debe). Cambio masivo de precios (un %, o una ganancia sobre el costo) y listas de precios (al mayor, revendedores) por cliente. Productos, clientes y proveedores se importan desde Excel o CSV, con vista previa fila por fila.
+- **Ventas:** historial, recibo, anulación con documento de reverso y devolución parcial: el cliente devuelve parte de lo que llevó y se le reembolsa el dinero o se descuenta de lo que debe. Cotizaciones que se imprimen, se mandan por WhatsApp y se venden después, y recargos (delivery, servicio, empaque) con o sin IVA.
+- **Fiado:** se deja a deber el resto de una venta a un cliente registrado, con días para pagar y límite de deuda por cliente. La deuda va en dólares aunque la factura sea en bolívares. Hay una pantalla con lo que debe cada cliente, su estado de cuenta y el cobro de abonos (en cualquier método y moneda), con recordatorio por WhatsApp. También se anota lo que alguien ya debía antes de usar el sistema, o un préstamo. Se puede desactivar en Ajustes.
 - **Gastos:** alquiler, luz, sueldos, fletes… con categorías que cada comercio edita; el dinero sale de la cuenta con la que se paga y se puede anular. Los que se repiten (alquiler, internet) se avisan al vencer o se registran solos a deber.
-- **Informes:** resultados con la utilidad (ventas, costo, gastos, pérdidas y comisiones), ventas por día, producto, método y vendedor, inventario valorado y finanzas; se exportan a Excel y se imprimen o guardan como PDF.
-- **Inventario:** los ajustes de existencia llevan un motivo editable (merma, vencido, uso interno, conteos…) y se ve lo que costó la mercancía que salió.
-- **Cuentas:** el efectivo, los bancos, el pago móvil y las billeteras con lo que hay en cada una; se crean nuevas y se transfiere dinero entre ellas (con cambio de moneda si hace falta). Cada método de pago puede llevar la comisión que descuenta el banco o el punto de venta: la cuenta recibe el cobro menos la comisión.
+- **Informes:** resultados con la utilidad (ventas, costo, gastos, pérdidas y comisiones), ventas por día, producto, categoría, método y vendedor, inventario valorado, finanzas y libro de ventas y compras con el IVA para el contador; todo comparado con el período anterior. Se exportan a Excel, se imprimen o guardan como PDF, y el cierre del mes se manda por WhatsApp.
+- **Inventario:** los ajustes de existencia llevan un motivo editable (merma, vencido, uso interno, conteos…) y se ve lo que costó la mercancía que salió. Si el negocio tiene depósito, otra tienda o un segundo mostrador, lleva la existencia de cada ubicación, traslada mercancía entre ellas y cada caja vende de su ubicación con su propio turno. Los perecederos llevan lotes con fecha de vencimiento: se vende primero lo que vence antes, se avisa de lo que va a vencer y lo vencido se da de baja. El conteo físico se hace desde el celular, escaneando con la cámara.
+- **Cuentas:** el efectivo, los bancos, el pago móvil y las billeteras con lo que hay en cada una; se crean nuevas y se transfiere dinero entre ellas (con cambio de moneda si hace falta). Cada método de pago puede llevar la comisión que descuenta el banco o el punto de venta: la cuenta recibe el cobro menos la comisión. La exposición cambiaria muestra cuánto se devaluaron los bolívares guardados desde que entraron.
 - **Por pagar:** compras y gastos que se dejan a deber a un proveedor, con su fecha límite, pagos parciales o totales, y la antigüedad de saldos (también en el fiado).
 - **Contactos:** clientes y proveedores con cédula o RIF.
-- **Inicio:** resumen del día, productos con existencia baja y el cierre del día en texto, para copiar o mandar por WhatsApp.
+- **Inicio:** resumen del día, productos con existencia baja, pérdidas de inventario y el cierre del día en texto, para copiar o mandar por WhatsApp. Un comercio nuevo ve una guía «para arrancar», y cada uno apaga las funciones que no usa (fiado, cotizaciones, listas de precios…).
 - **Tasa del BCV** automática, con carga manual e historial.
 - **Respaldos** diarios y manuales, con descarga y restauración.
 - **Impresora térmica** de 58 u 80 mm y gaveta de dinero.
@@ -35,13 +35,13 @@ Cada comercio configura lo suyo desde la aplicación: nombre, RIF, dirección, t
 
 ## Qué falta
 
-Antes de un piloto: probar con una impresora térmica real y con una USB compartida, y firmar el instalador. Pendiente aparte: cambio rápido de cajero y aprobación de supervisor con PIN, y devoluciones a proveedores.
+Antes de un piloto: probar con una impresora térmica real y con una USB compartida, y firmar el instalador. Pendiente aparte: cambio rápido de cajero y aprobación de supervisor con PIN, y vales a favor del cliente.
 
-En la fase 2 siguen: cambio masivo de precios, listas de precios y recargos de venta, cotizaciones, importación desde Excel, funciones activables por tipo de negocio, pendientes manuales de cobro y pago, y la comparación y el libro de ventas en los informes. Después, varias ubicaciones, lotes, cámara, y luego restaurante y ropa. El detalle, con la comparación contra Wink POS, está en [PLAN.md](PLAN.md#avance-al-15-de-octubre-de-2026).
+Lo siguiente es la fase 3: restaurante (mesas, comandas, recetas) y ropa (tallas y colores). El detalle, con la comparación contra Wink POS, está en [PLAN.md](PLAN.md#avance-al-24-de-octubre-de-2026).
 
 ## Requisitos
 
-[Bun](https://bun.sh) 1.3+. Para compilar la app de escritorio: Rust (ver más abajo).
+[Bun](https://bun.sh) 1.4.4 o más nuevo (las versiones anteriores tienen fallos de seguridad corregidos en octubre de 2026, entre ellos uno grave en la descompresión Brotli). Para compilar la app de escritorio: Rust (ver más abajo).
 
 ## Probarlo
 

@@ -1,5 +1,5 @@
 import { document, documentLine, variant } from "@millhiore/db"
-import { and, asc, eq, isNull, sql } from "drizzle-orm"
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm"
 import { alias } from "drizzle-orm/sqlite-core"
 import type { Reader } from "./receivables"
 
@@ -36,7 +36,7 @@ function returnedByVariant(db: Reader, saleId: string) {
       .leftJoin(reversal, eq(reversal.reversesDocumentId, document.id))
       .where(
         and(
-          eq(document.type, "RETURN"),
+          inArray(document.type, ["RETURN", "PURCHASE_RETURN"]),
           eq(document.returnsDocumentId, saleId),
           isNull(document.reversesDocumentId),
           isNull(reversal.id),
@@ -98,7 +98,7 @@ export function isReversed(db: Reader, documentId: string): boolean {
   )
 }
 
-/** Devoluciones vigentes de una venta (sin contar las anuladas): impide anular la venta. */
+/** Devoluciones vigentes de una venta o compra (sin las anuladas): impiden anularla. */
 export function activeReturns(db: Reader, saleId: string): number {
   const reversal = alias(document, "reversal")
   return db
@@ -107,7 +107,7 @@ export function activeReturns(db: Reader, saleId: string): number {
     .leftJoin(reversal, eq(reversal.reversesDocumentId, document.id))
     .where(
       and(
-        eq(document.type, "RETURN"),
+        inArray(document.type, ["RETURN", "PURCHASE_RETURN"]),
         eq(document.returnsDocumentId, saleId),
         isNull(document.reversesDocumentId),
         isNull(reversal.id),

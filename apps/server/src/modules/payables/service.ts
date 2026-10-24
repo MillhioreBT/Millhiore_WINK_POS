@@ -21,8 +21,6 @@ export function payables(db: Db, now: number): Payables {
     db
       .select({
         id: document.id,
-        type: document.type,
-        note: document.note,
         externalRef: document.externalRef,
         category: expenseCategory.name,
       })
@@ -74,8 +72,13 @@ export function payables(db: Db, now: number): Payables {
       paidMinor: d.paidMinor,
       outstandingMinor: d.outstandingMinor,
       overdue,
-      kind: detail?.type === "EXPENSE" ? "EXPENSE" : "PURCHASE",
-      label: detail?.type === "EXPENSE" ? detail.note || detail.category || "Gasto" : "Compra",
+      kind: d.type === "EXPENSE" || d.type === "DEBT_OUT" ? d.type : "PURCHASE",
+      label:
+        d.type === "EXPENSE"
+          ? d.note || detail?.category || "Gasto"
+          : d.type === "DEBT_OUT"
+            ? d.note || "Deuda"
+            : "Compra",
       externalRef: detail?.externalRef ?? null,
     })
     rows.set(key, row)

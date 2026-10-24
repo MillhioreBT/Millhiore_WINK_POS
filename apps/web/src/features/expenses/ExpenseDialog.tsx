@@ -25,6 +25,8 @@ import {
   queryClient,
   rateStatusQuery,
 } from "../../lib/queries"
+import { useFeatures } from "../../lib/session"
+import { useTerminal } from "../../lib/terminal"
 import { ContactPicker } from "../contacts/ContactPicker"
 
 const REFRESH = [
@@ -61,7 +63,7 @@ export function ExpenseDialog({
   const categories = useQuery(expenseCategoriesQuery())
   const rate = useQuery(rateStatusQuery)
   const methods = boot.data?.paymentMethods ?? []
-  const terminalId = boot.data?.terminals[0]?.id ?? ""
+  const terminalId = useTerminal()?.id ?? ""
   const shift = useQuery({ ...currentShiftQuery(terminalId), enabled: terminalId !== "" })
 
   const [categoryId, setCategoryId] = useState(prefill?.categoryId ?? "")
@@ -76,6 +78,8 @@ export function ExpenseDialog({
   const [supplier, setSupplier] = useState<Contact | null>(prefill?.contact ?? null)
   // A deber: todavía no se pagó; queda en «Por pagar» hasta que se le pague al proveedor.
   const [onCredit, setOnCredit] = useState(false)
+  // Sin «Por pagar» no se deja nada a deber.
+  const payablesOn = useFeatures().payables
   const [debtCurrency, setDebtCurrency] = useState(prefill?.currency ?? "")
   const [dueDay, setDueDay] = useState("")
   const [busy, setBusy] = useState(false)
@@ -206,22 +210,24 @@ export function ExpenseDialog({
               ))}
             </NativeSelect>
           </Field>
-          <div className="grid grid-cols-2 gap-2">
-            <Button
-              type="button"
-              variant={onCredit ? "outline" : "default"}
-              onClick={() => setOnCredit(false)}
-            >
-              Pagado ahora
-            </Button>
-            <Button
-              type="button"
-              variant={onCredit ? "default" : "outline"}
-              onClick={() => setOnCredit(true)}
-            >
-              Dejar a deber
-            </Button>
-          </div>
+          {payablesOn ? (
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                type="button"
+                variant={onCredit ? "outline" : "default"}
+                onClick={() => setOnCredit(false)}
+              >
+                Pagado ahora
+              </Button>
+              <Button
+                type="button"
+                variant={onCredit ? "default" : "outline"}
+                onClick={() => setOnCredit(true)}
+              >
+                Dejar a deber
+              </Button>
+            </div>
+          ) : null}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr]">
             {onCredit ? (
               <Field label="Moneda en que se debe" htmlFor="exp-currency">

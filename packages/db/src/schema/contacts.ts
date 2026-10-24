@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm"
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core"
+import { priceList } from "./catalog"
 
 /**
  * Clientes y proveedores. `taxId` es la cédula o el RIF tal como se imprime en la factura
@@ -20,6 +21,8 @@ export const contact = sqliteTable(
     creditDays: integer("credit_days").notNull().default(0),
     /** Tope de lo que puede deber, en la moneda de referencia del negocio; null = sin tope. */
     creditLimitMinor: integer("credit_limit_minor"),
+    /** Lista de precios con que compra; null = los precios base. */
+    priceListId: text("price_list_id").references(() => priceList.id),
     active: integer("active", { mode: "boolean" }).notNull().default(true),
     createdAt: integer("created_at").notNull(),
   },

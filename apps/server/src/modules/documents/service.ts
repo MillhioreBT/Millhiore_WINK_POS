@@ -3,25 +3,33 @@ import {
   allocation,
   contact,
   type Db,
+  discountCode,
   document,
+  documentCharge,
   documentLine,
   documentSurcharge,
   documentTax,
   expenseCategory,
+  location,
+  lot,
   payment,
   paymentMethod,
+  stockMove,
   stockReason,
+  terminal,
   user,
   variant,
 } from "@millhiore/db"
 import { DOCUMENT_TYPES, type DocumentType } from "@millhiore/domain"
-import { and, asc, desc, eq, gte, inArray, lt } from "drizzle-orm"
+import { and, asc, desc, eq, gte, inArray, lt, sql } from "drizzle-orm"
 import { alias } from "drizzle-orm/sqlite-core"
 import { HttpError } from "../../http/errors"
 
 const reversal = alias(document, "reversal")
 /** La venta de la que es una devolución. */
 const returned = alias(document, "returned")
+/** Adónde llegó un traslado. */
+const destination = alias(location, "destination")
 
 const summaryColumns = {
   id: document.id,
@@ -53,6 +61,12 @@ const summaryColumns = {
   creditMinor: document.creditMinor,
   creditCurrency: document.creditCurrency,
   dueAt: document.dueAt,
+  terminalName: terminal.name,
+  locationId: document.locationId,
+  locationName: location.name,
+  toLocationId: document.toLocationId,
+  toLocationName: destination.name,
+  discountCode: discountCode.code,
 }
 
 export function isDocumentType(value: string): value is DocumentType {
@@ -86,6 +100,10 @@ export function listDocuments(
     .leftJoin(contact, eq(contact.id, document.contactId))
     .leftJoin(expenseCategory, eq(expenseCategory.id, document.expenseCategoryId))
     .leftJoin(stockReason, eq(stockReason.id, document.stockReasonId))
+    .innerJoin(terminal, eq(terminal.id, document.terminalId))
+    .innerJoin(location, eq(location.id, document.locationId))
+    .leftJoin(destination, eq(destination.id, document.toLocationId))
+    .leftJoin(discountCode, eq(discountCode.id, document.discountCodeId))
     .where(filters.length ? and(...filters) : undefined)
     .orderBy(desc(document.postedAt), desc(document.id))
     .limit(opts.limit)
@@ -109,6 +127,10 @@ export function getDocument(db: Db, id: string): DocumentDetail {
     .leftJoin(contact, eq(contact.id, document.contactId))
     .leftJoin(expenseCategory, eq(expenseCategory.id, document.expenseCategoryId))
     .leftJoin(stockReason, eq(stockReason.id, document.stockReasonId))
+    .innerJoin(terminal, eq(terminal.id, document.terminalId))
+    .innerJoin(location, eq(location.id, document.locationId))
+    .leftJoin(destination, eq(destination.id, document.toLocationId))
+    .leftJoin(discountCode, eq(discountCode.id, document.discountCodeId))
     .where(eq(document.id, id))
     .get()
   if (!head) throw new HttpError(404, "NOT_FOUND", `No existe el documento ${id}`)
@@ -177,6 +199,23 @@ export function getDocument(db: Db, id: string): DocumentDetail {
     .orderBy(asc(documentSurcharge.position))
     .all()
 
+  const charges = db
+    .select({
+      chargeId: documentCharge.chargeId,
+      name: documentCharge.name,
+      kind: documentCharge.kind,
+      rateBp: documentCharge.rateBp,
+      baseMinor: documentCharge.baseMinor,
+      amountMinor: documentCharge.amountMinor,
+      amountLegalMinor: documentCharge.amountLegalMinor,
+      taxId: documentCharge.taxId,
+      taxRateBp: documentCharge.taxRateBp,
+    })
+    .from(documentCharge)
+    .where(eq(documentCharge.documentId, id))
+    .orderBy(asc(documentCharge.position))
+    .all()
+
   const sale = alias(document, "sale")
   const allocations = db
     .select({
@@ -190,16 +229,54 @@ export function getDocument(db: Db, id: string): DocumentDetail {
     .orderBy(asc(sale.postedAt), asc(sale.id))
     .all()
 
+  // Los lotes que movió cada línea; en un traslado, los que salieron del origen.
+  const lotMoves = db
+    .select({
+      lineId: stockMove.documentLineId,
+      lotId: lot.id,
+      code: lot.code,
+      expiresOn: lot.expiresOn,
+      qtyMilli: sql<number>`sum(abs(${stockMove.qtyMilli}))`,
+    })
+    .from(stockMove)
+    .innerJoin(lot, eq(lot.id, stockMove.lotId))
+    .innerJoin(documentLine, eq(documentLine.id, stockMove.documentLineId))
+    .where(
+      and(
+        eq(stockMove.documentId, id),
+        summary.type === "STOCK_TRANSFER"
+          ? eq(stockMove.locationId, summary.locationId)
+          : undefined,
+      ),
+    )
+    .groupBy(stockMove.documentLineId, lot.id)
+    .orderBy(asc(lot.expiresOn))
+    .all()
+  const lineNoOf = new Map(
+    db
+      .select({ id: documentLine.id, lineNo: documentLine.lineNo })
+      .from(documentLine)
+      .where(eq(documentLine.documentId, id))
+      .all()
+      .map((l) => [l.id, l.lineNo]),
+  )
+
   return {
     ...summary,
     rate:
       rateBase && rateQuote && rateValue
         ? { base: rateBase, quote: rateQuote, value: rateValue }
         : null,
-    lines,
+    lines: lines.map((l) => ({
+      ...l,
+      lots: lotMoves
+        .filter((m) => lineNoOf.get(m.lineId) === l.lineNo)
+        .map(({ lotId, code, expiresOn, qtyMilli }) => ({ lotId, code, expiresOn, qtyMilli })),
+    })),
     payments,
     taxes,
     surcharges,
+    charges,
     allocations,
   }
 }

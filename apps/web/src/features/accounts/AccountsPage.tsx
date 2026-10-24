@@ -29,6 +29,7 @@ import { can, useMe } from "../../lib/session"
 import { ReceiptDialog } from "../sales/ReceiptDialog"
 import { DocumentDialog } from "../sales/SalesPage"
 import { AccountDialog, KIND_LABEL } from "./AccountDialog"
+import { ExposureCard } from "./ExposureCard"
 import { PaymentMethodsCard } from "./PaymentMethodsCard"
 import { TransferDialog } from "./TransferDialog"
 
@@ -165,6 +166,8 @@ export function AccountsPage() {
         {inactive.map(card)}
       </div>
 
+      <ExposureCard />
+
       <Card>
         <CardHeader className="p-4 pb-2">
           <CardDescription>Transferencias recientes</CardDescription>
@@ -174,7 +177,10 @@ export function AccountsPage() {
             <TableBody>
               {transfers.data?.length ? null : (
                 <TableRow>
-                  <TableCell colSpan={3} className="py-8 text-center text-muted-foreground">
+                  <TableCell
+                    colSpan={3}
+                    className="whitespace-normal py-8 text-center text-muted-foreground"
+                  >
                     {transfers.isLoading
                       ? "Cargando…"
                       : "Cuando muevas dinero entre cuentas aparecerá aquí."}

@@ -97,4 +97,12 @@ describe("bitácora legible", () => {
       ),
     ).toBe("3 sesiones")
   })
+
+  test("cuenta los productos de un cambio de precios en lote", () => {
+    const bulk = (count: number) =>
+      entryDetail(entry({ entityType: "product", action: "product.prices.bulk", data: { count } }))
+    expect(bulk(1)).toBe("1 producto")
+    expect(bulk(12)).toBe("12 productos")
+    expect(actionLabel("product.prices.bulk")).toBe("Cambió precios en lote")
+  })
 })

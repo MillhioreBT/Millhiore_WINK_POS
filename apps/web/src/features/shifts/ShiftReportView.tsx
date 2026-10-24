@@ -71,6 +71,12 @@ export function ShiftReportView({
           value={formatMoney(report.supplierPayments.totalLegalMinor, legal)}
         />
       ) : null}
+      {report.supplierReturns.count ? (
+        <Row
+          label={`Devoluciones a proveedores (${report.supplierReturns.count})`}
+          value={formatMoney(report.supplierReturns.totalLegalMinor, legal)}
+        />
+      ) : null}
       {report.collections.count ? (
         <Row
           label={`Abonos de clientes (${report.collections.count})`}

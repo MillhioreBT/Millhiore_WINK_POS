@@ -17,7 +17,7 @@ import { useState } from "react"
 import { toast } from "sonner"
 import { ApiError, api, errorMessage } from "../../lib/api"
 import { currencySymbol, parseAmount, toInputAmount } from "../../lib/format"
-import { bootstrapQuery, queryClient } from "../../lib/queries"
+import { bootstrapQuery, priceListsQuery, queryClient } from "../../lib/queries"
 
 type Kind = Contact["kind"]
 
@@ -37,6 +37,11 @@ export function ContactDialog({
 }) {
   const boot = useQuery(bootstrapQuery)
   const reference = boot.data?.business.referenceCurrency ?? "USD"
+  const priceLists = useQuery(priceListsQuery({ all: true }))
+  // Se ofrecen las activas y, si la tiene, la que ya usa el contacto aunque esté desactivada.
+  const listOptions = boot.data?.features.priceLists
+    ? (priceLists.data ?? []).filter((l) => l.active || l.id === contact?.priceListId)
+    : []
   const [form, setForm] = useState({
     kind: contact?.kind ?? defaultKind,
     name: contact?.name ?? initialName,
@@ -47,6 +52,7 @@ export function ContactDialog({
     notes: contact?.notes ?? "",
     creditDays: String(contact?.creditDays ?? 0),
     creditLimit: contact?.creditLimitMinor != null ? toInputAmount(contact.creditLimitMinor) : "",
+    priceListId: contact?.priceListId ?? "",
     active: contact?.active ?? true,
   })
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -87,6 +93,7 @@ export function ContactDialog({
       notes: form.notes.trim() || null,
       creditDays: days,
       creditLimitMinor: limit,
+      ...(form.kind !== "supplier" ? { priceListId: form.priceListId || null } : {}),
     }
     try {
       const saved = contact
@@ -207,6 +214,27 @@ export function ContactDialog({
                 />
               </Field>
             </fieldset>
+          ) : null}
+          {form.kind !== "supplier" && listOptions.length ? (
+            <Field
+              label="Lista de precios"
+              htmlFor="c-price-list"
+              hint="En la caja se le aplican esos precios al elegirlo"
+            >
+              <NativeSelect
+                id="c-price-list"
+                value={form.priceListId}
+                onChange={set("priceListId")}
+              >
+                <option value="">Precios normales</option>
+                {listOptions.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                    {l.active ? "" : " (inactiva)"}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
           ) : null}
           {contact ? (
             <div className="flex items-center gap-3">

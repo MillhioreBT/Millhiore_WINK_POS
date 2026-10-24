@@ -4,6 +4,13 @@ import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { $ } from "bun"
 
+// El servidor compilado lleva dentro el Bun con que se compila: uno anterior a 1.4.4 tiene fallos
+// de seguridad (descompresión Brotli, certificados raíz, HTTP/3) que irían en el instalador.
+const MIN_BUN = "1.4.4"
+if (Bun.semver.order(Bun.version, MIN_BUN) < 0) {
+  throw new Error(`Bun ${Bun.version} es vulnerable: actualiza a ${MIN_BUN} o más (bun upgrade)`)
+}
+
 const root = resolve(import.meta.dir, "..", "..", "..")
 const tauriDir = resolve(import.meta.dir, "..", "src-tauri")
 

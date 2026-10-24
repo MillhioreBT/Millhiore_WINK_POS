@@ -1,9 +1,21 @@
 import type { CatalogItem, CreateProductBody, UpdateProductBody } from "@millhiore/contracts"
-import { auditLog, currency, type Db, product, stockBalance, tax, variant } from "@millhiore/db"
-import { uuidv7 } from "@millhiore/domain"
-import { and, asc, eq, like, or, sql } from "drizzle-orm"
+import {
+  auditLog,
+  business,
+  currency,
+  type Db,
+  lot,
+  lotBalance,
+  product,
+  stockBalance,
+  tax,
+  variant,
+} from "@millhiore/db"
+import { localDate, uuidv7 } from "@millhiore/domain"
+import { and, asc, eq, gt, inArray, like, or, sql } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
 import { requireActiveCategory } from "./categories"
+import { setListPrices } from "./priceLists"
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0]
 
@@ -19,6 +31,7 @@ const itemColumns = {
   taxId: product.taxId,
   categoryId: product.categoryId,
   tracksStock: product.tracksStock,
+  tracksLots: product.tracksLots,
   active: product.active,
   costMinor: variant.costMinor,
   costCurrency: variant.costCurrency,
@@ -27,10 +40,80 @@ const itemColumns = {
   minStockMilli: variant.minStockMilli,
 }
 
+type Row = Omit<CatalogItem, "stockByLocation" | "expiry">
+
+/**
+ * Agrega a cada producto lo que hay en cada ubicación (la caja vende de la suya) y, si lleva
+ * lotes, su próximo vencimiento y lo vencido en cada ubicación.
+ */
+function withStock(db: Db | Tx, rows: Row[], now: number): CatalogItem[] {
+  const ids = rows.map((r) => r.variantId)
+  const byVariant = new Map<string, Record<string, number>>()
+  const balances =
+    ids.length === 0
+      ? []
+      : db
+          .select()
+          .from(stockBalance)
+          .where(ids.length > 500 ? undefined : inArray(stockBalance.variantId, ids))
+          .all()
+  for (const b of balances) {
+    const entry = byVariant.get(b.variantId) ?? {}
+    entry[b.locationId] = b.qtyMilli
+    byVariant.set(b.variantId, entry)
+  }
+  const withLots = rows.filter((r) => r.tracksLots).map((r) => r.variantId)
+  const lots =
+    withLots.length === 0
+      ? []
+      : db
+          .select({
+            variantId: lot.variantId,
+            expiresOn: lot.expiresOn,
+            locationId: lotBalance.locationId,
+            qtyMilli: lotBalance.qtyMilli,
+          })
+          .from(lotBalance)
+          .innerJoin(lot, eq(lot.id, lotBalance.lotId))
+          .where(
+            and(
+              gt(lotBalance.qtyMilli, 0),
+              withLots.length > 500 ? undefined : inArray(lot.variantId, withLots),
+            ),
+          )
+          .all()
+  const tz = db.select({ tz: business.timezone }).from(business).get()?.tz ?? "America/Caracas"
+  const today = localDate(now, tz)
+  const expiryOf = (variantId: string): CatalogItem["expiry"] => {
+    const own = lots.filter((l) => l.variantId === variantId)
+    const expiredByLocation: Record<string, number> = {}
+    let nextExpiresOn: string | null = null
+    for (const l of own) {
+      if (l.expiresOn === null) continue
+      if (l.expiresOn < today) {
+        expiredByLocation[l.locationId] = (expiredByLocation[l.locationId] ?? 0) + l.qtyMilli
+      } else if (nextExpiresOn === null || l.expiresOn < nextExpiresOn) {
+        nextExpiresOn = l.expiresOn
+      }
+    }
+    return { nextExpiresOn, expiredByLocation }
+  }
+  return rows.map((r) => ({
+    ...r,
+    stockByLocation: byVariant.get(r.variantId) ?? {},
+    expiry: r.tracksLots ? expiryOf(r.variantId) : null,
+  }))
+}
+
 /** Productos con su variante de venta y la existencia total, ordenados por nombre. */
 export function listItems(
   db: Db | Tx,
-  opts: { search?: string | undefined; includeInactive?: boolean | undefined } = {},
+  opts: {
+    search?: string | undefined
+    includeInactive?: boolean | undefined
+    /** Para saber qué lotes ya vencieron. */
+    now?: number | undefined
+  } = {},
 ): CatalogItem[] {
   const term = opts.search?.trim()
   const filters = [
@@ -39,13 +122,17 @@ export function listItems(
       ? or(like(product.name, `%${term}%`), eq(variant.sku, term), eq(variant.barcode, term))
       : undefined,
   ].filter((f) => f !== undefined)
-  return db
-    .select(itemColumns)
-    .from(product)
-    .innerJoin(variant, eq(variant.productId, product.id))
-    .where(filters.length ? and(...filters) : undefined)
-    .orderBy(asc(product.name))
-    .all()
+  return withStock(
+    db,
+    db
+      .select(itemColumns)
+      .from(product)
+      .innerJoin(variant, eq(variant.productId, product.id))
+      .where(filters.length ? and(...filters) : undefined)
+      .orderBy(asc(product.name))
+      .all(),
+    opts.now ?? Date.now(),
+  )
 }
 
 function itemById(db: Db | Tx, productId: string): CatalogItem {
@@ -56,7 +143,7 @@ function itemById(db: Db | Tx, productId: string): CatalogItem {
     .where(eq(product.id, productId))
     .get()
   if (!row) throw new HttpError(404, "NOT_FOUND", `No existe el producto ${productId}`)
-  return row
+  return withStock(db, [row], Date.now())[0] ?? { ...row, stockByLocation: {}, expiry: null }
 }
 
 function checkReferences(
@@ -121,7 +208,11 @@ export function createProduct(
         ...(input.categoryId ? { categoryId: input.categoryId } : {}),
         priceCurrency: input.priceCurrency,
       })
+      if (input.tracksLots && input.kind !== "good") {
+        throw new HttpError(422, "INVALID_LOTS", "Un servicio no lleva lotes")
+      }
       const productId = uuidv7(now)
+      const variantId = uuidv7(now)
       try {
         tx.insert(product)
           .values({
@@ -129,6 +220,7 @@ export function createProduct(
             name: input.name,
             kind: input.kind,
             tracksStock: input.kind === "good",
+            tracksLots: input.kind === "good" && input.tracksLots,
             taxId: input.taxId ?? null,
             categoryId: input.categoryId ?? null,
             createdAt: now,
@@ -136,7 +228,7 @@ export function createProduct(
           .run()
         tx.insert(variant)
           .values({
-            id: uuidv7(now),
+            id: variantId,
             productId,
             sku: input.sku ?? nextSku(tx),
             barcode: input.barcode ?? null,
@@ -150,8 +242,11 @@ export function createProduct(
       } catch (e) {
         duplicateCode(e)
       }
+      const listPrices = input.listPrices?.length
+        ? setListPrices(tx, variantId, input.priceCurrency, input.listPrices).after
+        : undefined
       const item = itemById(tx, productId)
-      audit(tx, actorId, now, "product.created", productId, item)
+      audit(tx, actorId, now, "product.created", productId, { ...item, listPrices })
       return item
     },
     { behavior: "immediate" },
@@ -174,7 +269,11 @@ export function updateProduct(
         ...(patch.categoryId ? { categoryId: patch.categoryId } : {}),
         ...(patch.priceCurrency ? { priceCurrency: patch.priceCurrency } : {}),
       })
+      if (patch.tracksLots && !before.tracksStock) {
+        throw new HttpError(422, "INVALID_LOTS", "Un servicio no lleva lotes")
+      }
       const productSet = {
+        ...(patch.tracksLots !== undefined ? { tracksLots: patch.tracksLots } : {}),
         ...(patch.name !== undefined ? { name: patch.name } : {}),
         ...(patch.taxId !== undefined ? { taxId: patch.taxId } : {}),
         ...(patch.categoryId !== undefined ? { categoryId: patch.categoryId } : {}),
@@ -201,8 +300,20 @@ export function updateProduct(
       } catch (e) {
         duplicateCode(e)
       }
+      // Los precios propios por lista van en la moneda del precio base (la nueva, si cambió).
+      const listPrices = patch.listPrices?.length
+        ? setListPrices(
+            tx,
+            before.variantId,
+            patch.priceCurrency ?? before.priceCurrency,
+            patch.listPrices,
+          )
+        : undefined
       const after = itemById(tx, productId)
-      audit(tx, actorId, now, "product.updated", productId, { before, after })
+      audit(tx, actorId, now, "product.updated", productId, {
+        before: listPrices ? { ...before, listPrices: listPrices.before } : before,
+        after: listPrices ? { ...after, listPrices: listPrices.after } : after,
+      })
       return after
     },
     { behavior: "immediate" },

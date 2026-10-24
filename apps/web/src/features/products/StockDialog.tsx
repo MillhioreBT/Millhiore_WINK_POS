@@ -16,8 +16,10 @@ import { useQuery } from "@tanstack/react-query"
 import { useState } from "react"
 import { toast } from "sonner"
 import { api, errorMessage } from "../../lib/api"
-import { formatQty, parseAmount } from "../../lib/format"
-import { bootstrapQuery, queryClient, stockReasonsQuery } from "../../lib/queries"
+import { formatDate, formatQty, parseAmount } from "../../lib/format"
+import { stockAt, useLocations } from "../../lib/locations"
+import { bootstrapQuery, lotsQuery, queryClient, stockReasonsQuery } from "../../lib/queries"
+import { useTerminal } from "../../lib/terminal"
 
 type Mode = "in" | "out" | "count"
 
@@ -36,17 +38,28 @@ export function StockDialog({ item, onClose }: { item: CatalogItem | null; onClo
   const [reasonId, setReasonId] = useState("")
   const [note, setNote] = useState("")
   const [busy, setBusy] = useState(false)
+  // Con varias ubicaciones se ajusta lo de una (la de la caja, si no se elige otra).
+  const locations = useLocations()
+  const terminal = useTerminal()
+  const [picked, setPicked] = useState<string | null>(null)
+  // Producto con lotes: lo que entra trae su vencimiento; lo que sale, del lote que se elija o
+  // del que vence primero.
+  const [expiresOn, setExpiresOn] = useState("")
+  const [lotCode, setLotCode] = useState("")
+  const [lotId, setLotId] = useState("")
+  const withLots = (boot?.features.lots ?? false) && (item?.tracksLots ?? false)
+  const locationId = picked ?? terminal?.locationId ?? ""
+  const lots = useQuery({
+    ...lotsQuery({ variantId: item?.variantId ?? "", locationId }),
+    enabled: withLots && locationId !== "",
+  })
   if (!item) return null
+  const here = locations?.find((l) => l.id === locationId)
+  const current = locations ? stockAt(item, locationId) : item.stockMilli
 
   const parsed = parseAmount(qty, 3)
   const delta =
-    parsed === null
-      ? null
-      : mode === "in"
-        ? parsed
-        : mode === "out"
-          ? -parsed
-          : parsed - item.stockMilli
+    parsed === null ? null : mode === "in" ? parsed : mode === "out" ? -parsed : parsed - current
 
   // Los motivos del sentido elegido; en un conteo el motivo sale solo de si sobra o falta.
   const all = reasons.data ?? []
@@ -59,7 +72,7 @@ export function StockDialog({ item, onClose }: { item: CatalogItem | null; onClo
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
-    const terminalId = boot?.terminals[0]?.id
+    const terminalId = terminal?.id
     if (delta === null || !terminalId || !boot) {
       toast.error("Escribe una cantidad válida")
       return
@@ -77,19 +90,32 @@ export function StockDialog({ item, onClose }: { item: CatalogItem | null; onClo
           type: "ADJUSTMENT",
           terminalId,
           currency: boot.business.legalCurrency,
-          lines: [{ variantId: item.variantId, qtyMilli: delta, unitPriceMinor: 0 }],
+          lines: [
+            {
+              variantId: item.variantId,
+              qtyMilli: delta,
+              unitPriceMinor: 0,
+              ...(withLots && mode === "in" && expiresOn
+                ? { lot: { code: lotCode.trim() || null, expiresOn } }
+                : {}),
+              ...(withLots && mode === "out" && lotId ? { lotId } : {}),
+            },
+          ],
           payments: [],
+          ...(here ? { locationId: here.id } : {}),
           // Sin motivo elegido (o desactivado) el servidor usa «Otra entrada» u «Otra salida».
           stockReasonId: mode === "count" ? (countReason?.id ?? null) : (chosen?.id ?? null),
           note: note.trim() || null,
         },
       })
       await Promise.all(
-        ["products", "stock-adjustments", "stock-reasons"].map((k) =>
+        ["products", "stock-adjustments", "stock-reasons", "lots"].map((k) =>
           queryClient.invalidateQueries({ queryKey: [k] }),
         ),
       )
-      toast.success(`Existencia de ${item.name}: ${formatQty(item.stockMilli + delta)}`)
+      toast.success(
+        `Existencia de ${item.name}${here ? ` en ${here.name}` : ""}: ${formatQty(current + delta)}`,
+      )
       onClose()
     } catch (err) {
       toast.error(errorMessage(err))
@@ -104,10 +130,26 @@ export function StockDialog({ item, onClose }: { item: CatalogItem | null; onClo
         <DialogHeader>
           <DialogTitle>Ajustar existencia</DialogTitle>
           <DialogDescription>
-            {item.name} · existencia actual: <strong>{formatQty(item.stockMilli)}</strong>
+            {item.name} · existencia{here ? ` en ${here.name}` : " actual"}:{" "}
+            <strong>{formatQty(current)}</strong>
           </DialogDescription>
         </DialogHeader>
         <form id="stock-form" onSubmit={submit} className="grid grid-cols-1 gap-4">
+          {locations ? (
+            <Field label="Ubicación" htmlFor="s-location">
+              <NativeSelect
+                id="s-location"
+                value={locationId}
+                onChange={(e) => setPicked(e.target.value)}
+              >
+                {locations.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name} · hay {formatQty(stockAt(item, l.id))}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
+          ) : null}
           <Field label="Tipo de ajuste" htmlFor="s-mode">
             <NativeSelect
               id="s-mode"
@@ -127,7 +169,7 @@ export function StockDialog({ item, onClose }: { item: CatalogItem | null; onClo
             htmlFor="s-qty"
             hint={
               delta !== null && delta !== 0
-                ? `Quedará en ${formatQty(item.stockMilli + delta)}`
+                ? `Quedará en ${formatQty(current + delta)}`
                 : "Admite decimales para productos por peso"
             }
           >
@@ -164,6 +206,43 @@ export function StockDialog({ item, onClose }: { item: CatalogItem | null; onClo
               </NativeSelect>
             </Field>
           )}
+          {withLots && mode === "in" ? (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Vence" htmlFor="s-expires" hint="Vacío: queda sin lote">
+                <Input
+                  id="s-expires"
+                  type="date"
+                  value={expiresOn}
+                  onChange={(e) => setExpiresOn(e.target.value)}
+                />
+              </Field>
+              <Field label="Código del lote" htmlFor="s-lot-code">
+                <Input
+                  id="s-lot-code"
+                  value={lotCode}
+                  onChange={(e) => setLotCode(e.target.value)}
+                  placeholder="Opcional"
+                  maxLength={40}
+                />
+              </Field>
+            </div>
+          ) : null}
+          {withLots && mode === "out" ? (
+            <Field label="Lote" htmlFor="s-lot">
+              <NativeSelect id="s-lot" value={lotId} onChange={(e) => setLotId(e.target.value)}>
+                <option value="">El que vence primero</option>
+                {(lots.data?.rows ?? []).map((l) => (
+                  <option key={l.lotId} value={l.lotId}>
+                    {[
+                      l.code ? `Lote ${l.code}` : "Lote",
+                      l.expiresOn ? `vence ${formatDate(l.expiresOn)}` : "sin fecha",
+                      `hay ${formatQty(l.qtyMilli)}`,
+                    ].join(" · ")}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
+          ) : null}
           <Field label="Nota (opcional)" htmlFor="s-note">
             <Input
               id="s-note"

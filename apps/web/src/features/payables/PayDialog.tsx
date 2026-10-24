@@ -18,6 +18,7 @@ import { toast } from "sonner"
 import { api, errorMessage } from "../../lib/api"
 import { formatDateTime, formatMoney, parseAmount, toInputAmount } from "../../lib/format"
 import { bootstrapQuery, payablesQuery, queryClient, rateStatusQuery } from "../../lib/queries"
+import { deviceTerminal } from "../../lib/terminal"
 import {
   computeCheckout,
   makeContext,
@@ -135,7 +136,14 @@ function PayBody({
   const amount = parseAmount(amountText)
   const amountMinor = amount !== null ? Math.min(amount, balanceMinor) : 0
   const ticket = useMemo<Ticket>(
-    () => ({ lineTotals: [], discountMinor: 0, taxes: [], totalMinor: amountMinor, taxMinor: 0 }),
+    () => ({
+      lineTotals: [],
+      charges: [],
+      discountMinor: 0,
+      taxes: [],
+      totalMinor: amountMinor,
+      taxMinor: 0,
+    }),
     [amountMinor],
   )
   const checkout = useMemo(() => computeCheckout(ctx, ticket, payments), [ctx, ticket, payments])
@@ -165,7 +173,7 @@ function PayBody({
         body: {
           id: documentId,
           type: "PAYMENT_OUT",
-          terminalId: boot.terminals[0]?.id,
+          terminalId: deviceTerminal(boot)?.id,
           currency,
           rate: ctx.rate,
           contactId,

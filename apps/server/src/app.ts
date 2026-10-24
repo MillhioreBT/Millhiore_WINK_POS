@@ -16,13 +16,21 @@ import { registerAuditRoutes } from "./modules/audit/routes"
 import { registerBackupRoutes } from "./modules/backups/routes"
 import { registerBootstrapRoutes } from "./modules/bootstrap/routes"
 import { registerCatalogRoutes } from "./modules/catalog/routes"
+import { registerChargeRoutes } from "./modules/charges/routes"
 import { registerContactRoutes } from "./modules/contacts/routes"
+import { registerDebtRoutes } from "./modules/debts/routes"
+import { registerDiscountCodeRoutes } from "./modules/discount-codes/routes"
 import { registerDocumentRoutes } from "./modules/documents/routes"
 import { registerExpenseRoutes } from "./modules/expenses/routes"
+import { registerFeatureRoutes } from "./modules/features/routes"
+import { registerImportRoutes } from "./modules/imports/routes"
 import { registerInventoryRoutes } from "./modules/inventory/routes"
+import { registerLocationRoutes } from "./modules/locations/routes"
+import { registerLotRoutes } from "./modules/lots/routes"
 import { registerPayableRoutes } from "./modules/payables/routes"
 import { registerPaymentMethodRoutes } from "./modules/payment-methods/routes"
 import { registerPrintingRoutes } from "./modules/printing/routes"
+import { registerQuoteRoutes } from "./modules/quotes/routes"
 import { registerRateRoutes } from "./modules/rates/routes"
 import { registerReceivableRoutes } from "./modules/receivables/routes"
 import { registerRecurringRoutes } from "./modules/recurring/routes"
@@ -129,18 +137,26 @@ export function createApp(deps: AppDeps) {
   registerAccountRoutes(app, deps)
   registerPaymentMethodRoutes(app, deps)
   registerInventoryRoutes(app, deps)
+  registerLocationRoutes(app, deps)
+  registerLotRoutes(app, deps)
   registerDocumentRoutes(app, deps)
+  registerDiscountCodeRoutes(app, deps)
   registerExpenseRoutes(app, deps)
   registerRecurringRoutes(app, deps)
   registerRateRoutes(app, deps)
   registerSettingsRoutes(app, deps)
   registerCatalogRoutes(app, deps)
+  registerChargeRoutes(app, deps)
   registerBootstrapRoutes(app, deps)
   registerShiftRoutes(app, deps)
   registerContactRoutes(app, deps)
   registerReceivableRoutes(app, deps)
   registerPayableRoutes(app, deps)
+  registerDebtRoutes(app, deps)
   registerReportRoutes(app, deps)
+  registerQuoteRoutes(app, deps)
+  registerImportRoutes(app, deps)
+  registerFeatureRoutes(app, deps)
   registerBackupRoutes(app, deps)
   registerPrintingRoutes(app, deps)
 

@@ -20,6 +20,8 @@ function toApi(sale: Open, now: number): OpenSale {
     paidMinor: sale.paidMinor,
     outstandingMinor: sale.outstandingMinor,
     overdue: isOverdue(sale, now),
+    kind: sale.type === "DEBT_IN" ? "DEBT_IN" : "SALE",
+    label: sale.type === "DEBT_IN" ? sale.note || "Deuda" : "Venta",
   }
 }
 
@@ -133,7 +135,11 @@ export function statement(db: Db, contactId: string, now: number): Statement {
       and(
         eq(document.contactId, contactId),
         isNull(document.reversesDocumentId),
-        or(eq(document.type, "PAYMENT_IN"), eq(document.type, "SALE")),
+        or(
+          eq(document.type, "PAYMENT_IN"),
+          eq(document.type, "SALE"),
+          eq(document.type, "DEBT_IN"),
+        ),
       ),
     )
     .orderBy(desc(document.postedAt), desc(document.id))
@@ -160,7 +166,7 @@ export function statement(db: Db, contactId: string, now: number): Statement {
             {
               id: d.id,
               number: d.number,
-              type: "SALE",
+              type: d.type === "DEBT_IN" ? "DEBT_IN" : "SALE",
               postedAt: d.postedAt,
               currency: d.creditCurrency ?? d.currency,
               amountMinor: d.creditMinor,

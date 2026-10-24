@@ -29,6 +29,9 @@ import {
 } from "@millhiore/domain"
 import { and, asc, eq, gte, inArray, lt, type SQLWrapper, sql } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
+import { features } from "../features/routes"
+import { listAdjustments } from "../inventory/service"
+import { expiryCounts } from "../lots/routes"
 import { rateAt } from "../rates/service"
 
 type Business = typeof business.$inferSelect
@@ -138,7 +141,7 @@ function salesFigures(db: Db, biz: Business, book: CurrencyBook, from: number, t
  */
 export function daySummary(
   db: Db,
-  opts: { date?: string | undefined; now: number; includeStock: boolean },
+  opts: { date?: string | undefined; now: number; includeStock: boolean; seeCost: boolean },
 ): DaySummary {
   const biz = db.select().from(business).get()
   if (!biz) throw new HttpError(409, "NOT_CONFIGURED", "El negocio aún no está configurado")
@@ -240,12 +243,17 @@ export function daySummary(
 
   const purchases = db
     .select({
-      count: sql<number>`count(case when ${document.reversesDocumentId} is null then 1 end)`,
-      totalLegalMinor: sql<number>`coalesce(sum(${document.totalLegalMinor}), 0)`,
+      count: sql<number>`count(case when ${document.type} = 'PURCHASE' and ${document.reversesDocumentId} is null then 1 end)`,
+      // Lo devuelto a los proveedores resta de las compras.
+      totalLegalMinor: sql<number>`coalesce(sum(case when ${document.type} = 'PURCHASE_RETURN' then -${document.totalLegalMinor} else ${document.totalLegalMinor} end), 0)`,
     })
     .from(document)
     .where(
-      and(eq(document.type, "PURCHASE"), gte(document.postedAt, from), lt(document.postedAt, to)),
+      and(
+        inArray(document.type, ["PURCHASE", "PURCHASE_RETURN"]),
+        gte(document.postedAt, from),
+        lt(document.postedAt, to),
+      ),
     )
     .get()
 
@@ -312,9 +320,17 @@ export function daySummary(
       count: expenses?.count ?? 0,
       totalLegalMinor: expenses?.totalLegalMinor ?? 0,
     },
+    inventoryLossLegalMinor: opts.seeCost ? inventoryLoss(db, from, to) : null,
+    expiry: opts.includeStock && features(db).lots ? expiryCounts(db, opts.now) : null,
     openShifts,
     lowStock: opts.includeStock ? lowStock(db) : null,
   }
+}
+
+/** Salidas por ajuste (merma, vencido, uso interno…) menos entradas por ajuste, a costo. */
+function inventoryLoss(db: Db, from: number, to: number): number {
+  const a = listAdjustments(db, { from, to, limit: 1, seeCost: true })
+  return (a.outLegalMinor ?? 0) - (a.inLegalMinor ?? 0)
 }
 
 /** Productos activos que llevan existencia y están agotados o por debajo de su mínimo. */

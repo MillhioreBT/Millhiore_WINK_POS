@@ -1,6 +1,8 @@
 import { createRoute, z } from "@hono/zod-openapi"
 import {
   apiErrorSchema,
+  bulkPriceBodySchema,
+  bulkPriceResultSchema,
   type CatalogItem,
   catalogItemSchema,
   createProductSchema,
@@ -8,7 +10,10 @@ import {
 } from "@millhiore/contracts"
 import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
+import { forbidden } from "../../http/errors"
 import { registerCategoryRoutes } from "./categories"
+import { registerPriceListRoutes } from "./priceLists"
+import { bulkReprice } from "./pricing"
 import { createProduct, listItems, updateProduct } from "./service"
 
 const err = { content: { "application/json": { schema: apiErrorSchema } } }
@@ -61,6 +66,23 @@ const updateRoute = createRoute({
   },
 })
 
+const bulkPriceRoute = createRoute({
+  method: "post",
+  path: "/api/products/bulk-price",
+  tags: ["Catálogo"],
+  summary: "Cambia muchos precios a la vez (o solo calcula los cambios)",
+  description:
+    "Sube o baja un porcentaje, o pone una ganancia sobre el costo (exige también cost.view). " +
+    "Con apply: false no guarda nada; con apply: true guarda y deja una entrada en la bitácora.",
+  request: { body: { content: json(bulkPriceBodySchema), required: true } },
+  responses: {
+    200: { description: "Cambios", content: json(bulkPriceResultSchema) },
+    403: { description: "Falta catalog.manage (o cost.view para la ganancia)", ...err },
+    404: { description: "No existe la categoría", ...err },
+    422: { description: "Datos inválidos", ...err },
+  },
+})
+
 /** El costo solo lo ve quien tiene cost.view (el cajero no debe ver el margen). */
 function withCost<T extends CatalogItem>(item: T, permissions: ReadonlySet<string>): T {
   return permissions.has("cost.view") ? item : { ...item, costMinor: null, costCurrency: null }
@@ -68,11 +90,16 @@ function withCost<T extends CatalogItem>(item: T, permissions: ReadonlySet<strin
 
 export function registerCatalogRoutes(app: App, deps: AppDeps): void {
   registerCategoryRoutes(app, deps)
+  registerPriceListRoutes(app, deps)
 
   app.openapi(listRoute, (c) => {
     const actor = actorOf(c)
     const q = c.req.valid("query")
-    const items = listItems(deps.db, { search: q.search, includeInactive: q.all === "true" })
+    const items = listItems(deps.db, {
+      search: q.search,
+      includeInactive: q.all === "true",
+      now: deps.now(),
+    })
     return c.json(
       items.map((i) => withCost(i, actor.permissions)),
       200,
@@ -83,6 +110,14 @@ export function registerCatalogRoutes(app: App, deps: AppDeps): void {
     const actor = requirePermission(c, "catalog.manage")
     const item = createProduct(deps.db, c.req.valid("json"), actor.userId, deps.now())
     return c.json(withCost(item, actor.permissions), 201)
+  })
+
+  app.openapi(bulkPriceRoute, (c) => {
+    const actor = requirePermission(c, "catalog.manage")
+    const body = c.req.valid("json")
+    // El precio sacado del costo deja ver el costo: también hace falta poder verlo.
+    if (body.mode === "markup" && !actor.permissions.has("cost.view")) throw forbidden("cost.view")
+    return c.json(bulkReprice(deps.db, body, actor.userId, deps.now()), 200)
   })
 
   app.openapi(updateRoute, (c) => {

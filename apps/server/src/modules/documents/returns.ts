@@ -4,22 +4,44 @@ import { type LineTax, PostingError, returnLineDiscount } from "@millhiore/domai
 import { eq } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
 import { type PostContext, type PostedDocument, postDocument } from "../../posting/post"
-import { openSales } from "../../posting/receivables"
+import { openPayables, openSales } from "../../posting/receivables"
 import { isReversed, returnableLines } from "../../posting/returns"
 
+/** El tipo de un documento, para saber qué permiso pide devolverlo (o `undefined` si no existe). */
+export function documentType(db: Db, id: string): string | undefined {
+  return db.select({ type: document.type }).from(document).where(eq(document.id, id)).get()?.type
+}
+
+/** Una venta (la devuelve el cliente) o una compra (se le devuelve al proveedor), vigente. */
 function loadSale(db: Db, saleId: string) {
   const sale = db.select().from(document).where(eq(document.id, saleId)).get()
   if (!sale) throw new HttpError(404, "NOT_FOUND", `No existe el documento ${saleId}`)
-  if (sale.type !== "SALE" || sale.reversesDocumentId) {
-    throw new PostingError("NOT_RETURNABLE", "Solo se devuelven productos de una venta")
+  if ((sale.type !== "SALE" && sale.type !== "PURCHASE") || sale.reversesDocumentId) {
+    throw new PostingError(
+      "NOT_RETURNABLE",
+      "Solo se devuelven productos de una venta o una compra",
+    )
   }
   if (isReversed(db, sale.id)) {
-    throw new PostingError("NOT_RETURNABLE", `La venta ${sale.number} está anulada`)
+    throw new PostingError(
+      "NOT_RETURNABLE",
+      `La ${sale.type === "SALE" ? "venta" : "compra"} ${sale.number} está anulada`,
+    )
   }
-  return sale
+  return { ...sale, type: sale.type }
 }
 
-/** Lo que se puede devolver de una venta y con qué precio, descuento e IVA salió cada línea. */
+/** Lo que se le debe al otro de ese documento: el cliente de la venta, o el comercio al proveedor. */
+function debtOf(db: Db, doc: ReturnType<typeof loadSale>) {
+  if (!doc.contactId) return undefined
+  const filter = { contactId: doc.contactId, ids: [doc.id] }
+  return (doc.type === "SALE" ? openSales : openPayables)(db, filter)[0]
+}
+
+/**
+ * Lo que se puede devolver de una venta (o de una compra, al proveedor) y con qué precio,
+ * descuento e IVA salió cada línea.
+ */
 export function returnableOf(db: Db, saleId: string): Returnable {
   const sale = loadSale(db, saleId)
   const kinds = new Map(
@@ -32,10 +54,9 @@ export function returnableOf(db: Db, saleId: string): Returnable {
   const who = sale.contactId
     ? db.select({ name: contact.name }).from(contact).where(eq(contact.id, sale.contactId)).get()
     : undefined
-  const debt = sale.contactId
-    ? openSales(db, { contactId: sale.contactId, ids: [sale.id] })[0]
-    : undefined
+  const debt = debtOf(db, sale)
   return {
+    kind: sale.type,
     documentId: sale.id,
     number: sale.number,
     currency: sale.currency,
@@ -62,9 +83,10 @@ export function returnableOf(db: Db, saleId: string): Returnable {
 }
 
 /**
- * Registra la devolución de parte de una venta. Los precios, el descuento y el IVA los fija el
- * servidor con los de la venta (la caja solo dice qué líneas y cuánto), y el dinero sale por los
- * métodos indicados o se descuenta de lo que el cliente debe de esa venta.
+ * Registra la devolución de parte de una venta (o de una compra, al proveedor). Los precios, el
+ * descuento y el IVA los fija el servidor con los del documento (la caja solo dice qué líneas y
+ * cuánto), y el dinero se mueve por los métodos indicados o se descuenta de lo que se debe de ese
+ * documento. Lo devuelto al proveedor sale de la ubicación a la que entró la compra.
  */
 export function postReturn(
   db: Db,
@@ -85,7 +107,10 @@ export function postReturn(
   const input = body.lines.map((r) => {
     const l = lines.get(r.lineNo)
     if (!l || seen.has(r.lineNo)) {
-      throw new PostingError("NOT_RETURNABLE", `La venta no tiene la línea ${r.lineNo}`)
+      throw new PostingError(
+        "NOT_RETURNABLE",
+        `La ${sale.type === "SALE" ? "venta" : "compra"} no tiene la línea ${r.lineNo}`,
+      )
     }
     seen.add(r.lineNo)
     if (r.qtyMilli > l.remainingMilli) {
@@ -120,7 +145,8 @@ export function postReturn(
     db,
     {
       id: body.id,
-      type: "RETURN",
+      type: sale.type === "SALE" ? "RETURN" : "PURCHASE_RETURN",
+      ...(sale.type === "PURCHASE" ? { locationId: sale.locationId } : {}),
       terminalId: body.terminalId,
       currency: sale.currency,
       rate: body.rate,

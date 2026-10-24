@@ -54,6 +54,8 @@ const day: DaySummary = {
   purchases: { count: 1, totalLegalMinor: 80000 },
   expenses: { count: 2, totalLegalMinor: 15000 },
   collections: { count: 2, totalLegalMinor: 9000 },
+  inventoryLossLegalMinor: 4500,
+  expiry: null,
   openShifts: [{ id: "s1", terminalName: "Caja 1", openedAt: 1, openedBy: "Ana" }],
   lowStock: [
     { productId: "p", variantId: "v", name: "Harina", stockMilli: 1000, minStockMilli: 5000 },
@@ -112,6 +114,7 @@ describe("cierre del día para WhatsApp", () => {
       "*POR PAGAR (PROVEEDORES)*",
       "$ 40,00 · 2 proveedores · $ 15,00 vencido",
       "*GASTOS*",
+      "Pérdidas de inventario: Bs 45,00",
       "• Harina: 1",
       "Cajas abiertas: Caja 1",
     ]) {
@@ -139,6 +142,7 @@ describe("cierre del día para WhatsApp", () => {
       purchases: { count: 0, totalLegalMinor: 0 },
       expenses: { count: 0, totalLegalMinor: 0 },
       collections: { count: 0, totalLegalMinor: 0 },
+      inventoryLossLegalMinor: null,
       openShifts: [],
       lowStock: [],
     }
@@ -157,6 +161,7 @@ describe("cierre del día para WhatsApp", () => {
       "POR COBRAR",
       "POR PAGAR",
       "GASTOS",
+      "Pérdidas",
       "POR REPONER",
       "Cajas abiertas",
     ]) {

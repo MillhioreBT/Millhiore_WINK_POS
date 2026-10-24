@@ -14,7 +14,7 @@ import {
   TableRow,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
-import { BookOpenIcon, HandCoinsIcon, SearchIcon } from "lucide-react"
+import { BookOpenIcon, HandCoinsIcon, PlusIcon, SearchIcon } from "lucide-react"
 import { useMemo, useState } from "react"
 import { AgingBar } from "../../components/AgingBar"
 import { formatDateTime, formatMoney } from "../../lib/format"
@@ -22,6 +22,7 @@ import { bootstrapQuery, rateStatusQuery, receivablesQuery } from "../../lib/que
 import { can, useMe } from "../../lib/session"
 import { ReceiptDialog } from "../sales/ReceiptDialog"
 import { CollectDialog } from "./CollectDialog"
+import { DebtDialog } from "./DebtDialog"
 import { StatementDialog } from "./StatementDialog"
 
 const day = (ms: number) => formatDateTime(ms).split(",")[0]
@@ -36,7 +37,9 @@ export function ReceivablesPage() {
   const [statementOf, setStatementOf] = useState<string | null>(null)
   const [collecting, setCollecting] = useState<string | null>(null)
   const [receiptId, setReceiptId] = useState<string | null>(null)
+  const [addingDebt, setAddingDebt] = useState(false)
   const canCollect = can(me, "payment.receive")
+  const canAddDebt = can(me, "finance.manage")
   const legal = boot.data?.business.legalCurrency
   const reference = boot.data?.business.referenceCurrency
   const factor = rate.data?.current && Number(rate.data.current.value)
@@ -59,7 +62,17 @@ export function ReceivablesPage() {
     <div className="grid grid-cols-1 gap-4">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="font-semibold text-xl">Fiado</h1>
-        <div className="relative ml-auto w-full sm:w-72">
+        {canAddDebt ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className="ml-auto sm:order-last sm:ml-0"
+            onClick={() => setAddingDebt(true)}
+          >
+            <PlusIcon /> Anotar deuda
+          </Button>
+        ) : null}
+        <div className="relative w-full sm:ml-auto sm:w-72">
           <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={search}
@@ -132,7 +145,7 @@ export function ReceivablesPage() {
                     ? "Cargando…"
                     : search
                       ? "Nadie coincide con la búsqueda."
-                      : "Cuando fíes una venta aparecerá aquí."}
+                      : "Cuando fíes una venta, o anotes lo que alguien ya te debía, aparecerá aquí."}
                 </TableCell>
               </TableRow>
             ) : null}
@@ -146,7 +159,7 @@ export function ReceivablesPage() {
                     </Badge>
                   ) : null}
                   <span className="block font-normal text-muted-foreground text-xs">
-                    {c.openCount} venta{c.openCount === 1 ? "" : "s"}
+                    {c.openCount} por cobrar
                     <span className="sm:hidden"> · desde {day(c.oldestPostedAt)}</span>
                   </span>
                 </TableCell>
@@ -207,6 +220,13 @@ export function ReceivablesPage() {
             setCollecting(null)
             setReceiptId(id)
           }}
+        />
+      ) : null}
+      {addingDebt ? (
+        <DebtDialog
+          type="DEBT_IN"
+          onClose={() => setAddingDebt(false)}
+          onPosted={() => setAddingDebt(false)}
         />
       ) : null}
       <ReceiptDialog documentId={receiptId} onClose={() => setReceiptId(null)} done="Listo" />

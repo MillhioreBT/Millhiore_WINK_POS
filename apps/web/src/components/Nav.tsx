@@ -1,10 +1,14 @@
 import { cn } from "@millhiore/ui"
 import { Link, useRouterState } from "@tanstack/react-router"
 import {
+  ArrowLeftRightIcon,
   BarChart3Icon,
   BookOpenIcon,
   BoxesIcon,
+  CalendarClockIcon,
   ChevronDownIcon,
+  ClipboardCheckIcon,
+  FileTextIcon,
   LandmarkIcon,
   LayoutDashboardIcon,
   type LucideIcon,
@@ -18,7 +22,7 @@ import {
   WalletIcon,
 } from "lucide-react"
 import { useEffect, useState } from "react"
-import { can, useMe } from "../lib/session"
+import { can, useFeatures, useMe } from "../lib/session"
 
 export interface NavLink {
   to: string
@@ -37,6 +41,7 @@ const isGroup = (e: NavEntry): e is Extract<NavEntry, { items: NavLink[] }> => "
  */
 export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
   const me = useMe()
+  const features = useFeatures()
   const show = (...p: string[]) => can(me, ...p)
   const entries: (NavEntry | null)[] = [
     show("report.view") ? { to: "/inicio", label: "Inicio", icon: LayoutDashboardIcon } : null,
@@ -45,6 +50,9 @@ export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
       show("sale.create", "report.view")
         ? { to: "/ventas", label: "Historial", icon: ReceiptTextIcon }
         : null,
+      features.quotes && show("sale.create", "report.view")
+        ? { to: "/cotizaciones", label: "Cotizaciones", icon: FileTextIcon }
+        : null,
       show("payment.receive", "finance.view")
         ? { to: "/fiado", label: "Fiado", icon: BookOpenIcon }
         : null,
@@ -52,9 +60,21 @@ export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
     show("catalog.manage", "inventory.view")
       ? { to: "/productos", label: "Productos", icon: PackageIcon }
       : null,
-    show("inventory.view", "inventory.adjust")
-      ? { to: "/inventario", label: "Inventario", icon: BoxesIcon }
-      : null,
+    // Con varias ubicaciones, Inventario agrupa los ajustes y los traslados.
+    inventoryGroup([
+      show("inventory.view", "inventory.adjust")
+        ? { to: "/inventario", label: "Ajustes", icon: BoxesIcon }
+        : null,
+      show("inventory.adjust")
+        ? { to: "/conteo", label: "Conteo físico", icon: ClipboardCheckIcon }
+        : null,
+      features.locations && show("inventory.adjust")
+        ? { to: "/traslados", label: "Traslados", icon: ArrowLeftRightIcon }
+        : null,
+      features.lots && show("inventory.view", "inventory.adjust")
+        ? { to: "/vencimientos", label: "Vencimientos", icon: CalendarClockIcon }
+        : null,
+    ]),
     show("purchase.create") ? { to: "/compras", label: "Compras", icon: TruckIcon } : null,
     show("contact.manage", "purchase.create")
       ? { to: "/contactos", label: "Contactos", icon: UsersIcon }
@@ -64,7 +84,7 @@ export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
       show("expense.create", "finance.view", "report.view")
         ? { to: "/gastos", label: "Gastos", icon: WalletIcon }
         : null,
-      show("payable.manage", "finance.view")
+      features.payables && show("payable.manage", "finance.view")
         ? { to: "/pagar", label: "Por pagar", icon: ScrollTextIcon }
         : null,
       show("finance.manage", "finance.view")
@@ -78,6 +98,14 @@ export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
       ? { to: "/ajustes", label: "Ajustes", icon: SettingsIcon }
       : null,
   }
+}
+
+/** Inventario: si solo se ve la pantalla de ajustes, el enlace se llama «Inventario». */
+function inventoryGroup(items: (NavLink | null)[]): NavEntry | null {
+  const visible = items.filter((i): i is NavLink => i !== null)
+  const [only] = visible
+  if (visible.length === 1 && only?.to === "/inventario") return { ...only, label: "Inventario" }
+  return group("Inventario", BoxesIcon, visible)
 }
 
 function group(label: string, icon: LucideIcon, items: (NavLink | null)[]): NavEntry | null {

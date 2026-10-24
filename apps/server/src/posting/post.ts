@@ -9,16 +9,22 @@ import {
   contact,
   currency,
   type Db,
+  discountCode,
   document,
+  documentCharge,
   documentLine,
   documentSequence,
   documentSurcharge,
   documentTax,
   expenseCategory,
+  location,
+  lot,
   outbox,
   payment,
   paymentMethod,
   product,
+  quote,
+  saleCharge,
   stockBalance,
   stockMove,
   stockReason,
@@ -31,16 +37,25 @@ import {
   type CurrencyBook,
   type CurrencyCode,
   commissionMinor,
+  convert,
   type DocumentDraft,
   type DocumentType,
   type DraftAllocation,
+  type DraftCharge,
   type ExchangeRate,
   exchangeRate,
   formatDocumentNumber,
   isCashMovement,
+  isReturn,
   isUuidv7,
+  isValidDate,
   type LineTax,
+  type LotTake,
+  lineTotal,
+  localDate,
+  money,
   type PlannedLine,
+  type PlannedStockMove,
   PostingError,
   planPosting,
   type SurchargeGroup,
@@ -49,7 +64,9 @@ import {
   type TaxpayerType,
   uuidv7,
 } from "@millhiore/domain"
-import { and, asc, eq, inArray, sql } from "drizzle-orm"
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm"
+import { alias } from "drizzle-orm/sqlite-core"
+import { allocateOut, applyLotMove, lotFor, lotQty, purchaseLots, returnableLots } from "./lots"
 import { collectedOn, openPayables, openSales, owedInReference } from "./receivables"
 import { activeReturns, isReversed, returnableLines } from "./returns"
 
@@ -66,6 +83,10 @@ export interface PostLineInput {
    * venta, que debe conservar el IVA y la alícuota con que se facturó; la API pública no lo admite.
    */
   tax?: LineTax | null | undefined
+  /** Producto con lotes: el lote existente del que sale (ajuste, traslado) o al que entra (ajuste). */
+  lotId?: string | undefined
+  /** Producto con lotes: el lote nuevo que entra (compra, ajuste de entrada). */
+  lot?: { code?: string | null | undefined; expiresOn: string | null } | undefined
 }
 
 export interface PostPaymentInput {
@@ -125,6 +146,27 @@ export interface PostDocumentInput {
   stockReasonId?: string | null | undefined
   /** Compra o gasto a deber: hasta cuándo hay para pagar (si falta, los días de crédito del proveedor). */
   dueAt?: number | null | undefined
+  /**
+   * Venta: recargos (delivery, servicio…). El de monto fijo puede traer el monto en la moneda del
+   * documento; si falta, se usa el sugerido convertido con la tasa del documento.
+   */
+  charges?: readonly { chargeId: string; amountMinor?: number | undefined }[] | undefined
+  /** Venta que sale de una cotización abierta: queda convertida en la misma transacción. */
+  quoteId?: string | null | undefined
+  /**
+   * Compra, ajuste o traslado: la ubicación cuya existencia cambia (en el traslado, el origen).
+   * Si falta, la de la caja. Las ventas y devoluciones mueven siempre la ubicación de su caja.
+   */
+  locationId?: string | null | undefined
+  /** Traslado (`STOCK_TRANSFER`): la ubicación a la que llega la mercancía. */
+  toLocationId?: string | null | undefined
+  /** Venta con código de descuento. */
+  discountCodeId?: string | null | undefined
+  /**
+   * Lo pone el servidor (nunca la API): quien vende no puede dar descuentos a mano, así que los
+   * descuentos de la venta no pueden pasar de lo que da su código.
+   */
+  discountFromCodeOnly?: boolean | undefined
 }
 
 export interface PostContext {
@@ -180,6 +222,21 @@ const SHIFT_TYPES: ReadonlySet<DocumentType> = new Set([
 ])
 
 const DAY_MS = 86_400_000
+
+/** Documentos que pueden mover la existencia de otra ubicación que la de su caja (el depósito). */
+const LOCATION_TYPES: ReadonlySet<DocumentType> = new Set([
+  "PURCHASE",
+  "PURCHASE_RETURN",
+  "ADJUSTMENT",
+  "STOCK_TRANSFER",
+])
+
+function requireActiveLocation(tx: Tx, id: string): void {
+  const row = tx.select({ active: location.active }).from(location).where(eq(location.id, id)).get()
+  if (!row?.active) {
+    throw new PostingError("UNKNOWN_REFERENCE", `Ubicación desconocida o inactiva: ${id}`)
+  }
+}
 
 /**
  * Una compra deja el último costo de cada producto. Sin IVA si el negocio lo acredita (el IVA
@@ -442,6 +499,19 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
   }
   const biz = tx.select().from(business).get()
   if (!biz) throw new PostingError("UNKNOWN_REFERENCE", "El negocio no está configurado")
+  if ((input.locationId || input.toLocationId) && !LOCATION_TYPES.has(input.type)) {
+    throw new PostingError(
+      "INVALID_LINE",
+      "Solo una compra (o su devolución), un ajuste o un traslado eligen la ubicación: lo demás usa la de la caja",
+    )
+  }
+  if (input.toLocationId && input.type !== "STOCK_TRANSFER") {
+    throw new PostingError("INVALID_LINE", "Solo un traslado lleva ubicación de destino")
+  }
+  const locationId = input.locationId || term.locationId
+  if (locationId !== term.locationId) requireActiveLocation(tx, locationId)
+  const toLocationId = input.type === "STOCK_TRANSFER" ? (input.toLocationId ?? null) : null
+  if (toLocationId) requireActiveLocation(tx, toLocationId)
   const book = loadBook(tx)
   const party = input.contactId
     ? tx
@@ -519,6 +589,7 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
             id: variant.id,
             active: variant.active,
             tracksStock: product.tracksStock,
+            tracksLots: product.tracksLots,
             taxId: product.taxId,
             costMinor: variant.costMinor,
             costCurrency: variant.costCurrency,
@@ -534,12 +605,41 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       throw new PostingError("UNKNOWN_REFERENCE", `Variante desconocida o inactiva: ${id}`)
     }
   }
+  // Un lote nuevo entra con una compra o un ajuste de entrada; uno existente se elige al ajustar o
+  // trasladar. Lo demás reparte solo.
+  for (const [i, l] of input.lines.entries()) {
+    if (!l.lot && !l.lotId) continue
+    const fail = (why: string) => {
+      throw new PostingError("INVALID_LINE", `Línea ${i + 1}: ${why}`)
+    }
+    if (!variants.get(l.variantId)?.tracksLots) fail("el producto no lleva lotes")
+    if (l.lot && l.lotId) fail("elige un lote existente o uno nuevo, no los dos")
+    if (l.lot) {
+      if (!(input.type === "PURCHASE" || (input.type === "ADJUSTMENT" && l.qtyMilli > 0))) {
+        fail("solo una compra o una entrada de inventario traen un lote nuevo")
+      }
+      if (l.lot.expiresOn !== null && !isValidDate(l.lot.expiresOn)) {
+        fail("la fecha de vencimiento no es válida")
+      }
+    }
+    if (l.lotId) {
+      if (input.type !== "ADJUSTMENT" && input.type !== "STOCK_TRANSFER") {
+        fail("solo un ajuste o un traslado eligen el lote")
+      }
+      const row = tx.select({ variantId: lot.variantId }).from(lot).where(eq(lot.id, l.lotId)).get()
+      if (row?.variantId !== l.variantId) {
+        throw new PostingError("UNKNOWN_REFERENCE", `Línea ${i + 1}: lote desconocido`)
+      }
+    }
+  }
 
   // El IVA lo decide el servidor según el producto y la condición fiscal, nunca el cliente.
   // Quien no cobra IVA vende sin impuesto, pero sus compras sí lo traen del proveedor.
   const { fiscal } = ctx
   const charged =
-    input.type !== "ADJUSTMENT" && !(input.type === "SALE" && fiscal.taxpayer === "none")
+    input.type !== "ADJUSTMENT" &&
+    input.type !== "STOCK_TRANSFER" &&
+    !(input.type === "SALE" && fiscal.taxpayer === "none")
   const taxIdOf = (variantId: string) => variants.get(variantId)?.taxId ?? fiscal.defaultTaxId
   const taxIds = charged
     ? [...new Set(input.lines.filter((l) => l.tax === undefined).map((l) => taxIdOf(l.variantId)))]
@@ -611,7 +711,12 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
   // Un gasto pagado en efectivo sale de la gaveta de la terminal, así que exige turno abierto;
   // pagado por banco, pago móvil o Zelle no depende de ninguna caja.
   if (
-    (input.type === "EXPENSE" || input.type === "PAYMENT_OUT" || input.type === "TRANSFER") &&
+    (input.type === "EXPENSE" ||
+      input.type === "PURCHASE_RETURN" ||
+      input.type === "PAYMENT_OUT" ||
+      input.type === "TRANSFER" ||
+      input.type === "DEBT_IN" ||
+      input.type === "DEBT_OUT") &&
     !shiftId &&
     ctx.requireShift &&
     input.payments.some((p) => methods.get(p.paymentMethodId)?.accountKind === "cash")
@@ -626,20 +731,23 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       `La tasa ${docRate.base}/${docRate.quote} no involucra la moneda del documento (${input.currency})`,
     )
   }
-  // Devolución: de una venta vigente, sin devolver más de lo vendido.
+  // Devolución: de una venta (o, al proveedor, de una compra) vigente, sin devolver más de lo
+  // que tuvo.
   let returnOf: typeof document.$inferSelect | undefined
-  if (input.type === "RETURN") {
+  if (isReturn(input.type)) {
+    const [of, what] =
+      input.type === "RETURN" ? (["SALE", "venta"] as const) : (["PURCHASE", "compra"] as const)
     returnOf = input.returnsDocumentId
       ? tx.select().from(document).where(eq(document.id, input.returnsDocumentId)).get()
       : undefined
-    if (returnOf?.type !== "SALE" || returnOf.reversesDocumentId) {
-      throw new PostingError("NOT_RETURNABLE", "Elige una venta para devolver")
+    if (returnOf?.type !== of || returnOf.reversesDocumentId) {
+      throw new PostingError("NOT_RETURNABLE", `Elige una ${what} para devolver`)
     }
     if (isReversed(tx, returnOf.id)) {
-      throw new PostingError("NOT_RETURNABLE", `La venta ${returnOf.number} está anulada`)
+      throw new PostingError("NOT_RETURNABLE", `La ${what} ${returnOf.number} está anulada`)
     }
     if (input.currency !== returnOf.currency) {
-      throw new PostingError("CURRENCY_MISMATCH", "La devolución va en la moneda de la venta")
+      throw new PostingError("CURRENCY_MISMATCH", `La devolución va en la moneda de la ${what}`)
     }
     const left = new Map<string, number>()
     for (const l of returnableLines(tx, returnOf.id)) {
@@ -650,7 +758,7 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       if (remaining < 0) {
         throw new PostingError(
           "NOT_RETURNABLE",
-          `De ${l.variantId} no se puede devolver más de lo que se vendió y no se ha devuelto`,
+          `De ${l.variantId} no se puede devolver más de lo que se ${of === "SALE" ? "vendió" : "compró"} y no se ha devuelto`,
         )
       }
       left.set(l.variantId, remaining)
@@ -658,7 +766,11 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
   }
   const creditMinor = input.creditMinor ?? 0
   // Una deuda en bolívares se devalúa: por defecto se lleva en la moneda de referencia.
-  const creditCurrency = input.creditCurrency ?? biz.referenceCurrency
+  // Una deuda manual se lleva en la moneda en que se anotó.
+  const creditCurrency =
+    input.type === "DEBT_IN" || input.type === "DEBT_OUT"
+      ? input.currency
+      : (input.creditCurrency ?? biz.referenceCurrency)
   const allocations = input.allocations ?? []
   if (input.type === "SALE" && creditMinor > 0) {
     if (!ctx.creditEnabled) {
@@ -680,6 +792,13 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
         throw new PostingError("CREDIT_DENIED", "Con esta venta supera su límite de crédito")
       }
     }
+  }
+  // Una deuda manual es de un cliente (lo que nos debe) o de un proveedor (lo que le debemos).
+  if (input.type === "DEBT_IN" && (!party || party.kind === "supplier")) {
+    throw new PostingError("CREDIT_DENIED", "Elige el cliente que debe")
+  }
+  if (input.type === "DEBT_OUT" && (!party || party.kind === "customer")) {
+    throw new PostingError("CREDIT_DENIED", "Elige el proveedor al que le debes")
   }
   // Lo que se le debe a un proveedor: una compra o un gasto a deber exige a quién se le debe.
   if ((input.type === "PURCHASE" || input.type === "EXPENSE") && creditMinor > 0) {
@@ -751,30 +870,35 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       }
     }
   }
-  // Una devolución puede descontarse de lo que el cliente debe de esa misma venta.
+  // Una devolución puede descontarse de lo que se debe de ese mismo documento: lo que el cliente
+  // debe de la venta, o lo que se le debe al proveedor de la compra.
   let allocationCurrency: CurrencyCode | undefined
-  if (input.type === "RETURN" && allocations.length > 0) {
+  if (isReturn(input.type) && allocations.length > 0) {
+    const what = input.type === "RETURN" ? "venta" : "compra"
     if (!party || party.id !== returnOf?.contactId) {
       throw new PostingError(
         "INVALID_ALLOCATION",
-        "Solo se descuenta de la deuda del cliente de la venta devuelta",
+        `Solo se descuenta de la deuda con el contacto de la ${what} devuelta`,
       )
     }
     if (allocations.some((a) => a.saleDocumentId !== returnOf?.id)) {
       throw new PostingError(
         "INVALID_ALLOCATION",
-        "Solo se descuenta de la deuda de la venta devuelta",
+        `Solo se descuenta de la deuda de la ${what} devuelta`,
       )
     }
-    const sale = openSales(tx, { contactId: party.id, ids: [returnOf.id] })[0]
+    const owed = (input.type === "RETURN" ? openSales : openPayables)(tx, {
+      contactId: party.id,
+      ids: [returnOf.id],
+    })[0]
     const wanted = allocations[0]?.amountMinor ?? 0
-    if (!sale || wanted > sale.outstandingMinor) {
+    if (!owed || wanted > owed.outstandingMinor) {
       throw new PostingError(
         "INVALID_ALLOCATION",
-        `La venta solo debe ${sale?.outstandingMinor ?? 0} (unidades menores)`,
+        `La ${what} solo debe ${owed?.outstandingMinor ?? 0} (unidades menores)`,
       )
     }
-    allocationCurrency = sale.currency
+    allocationCurrency = owed.currency
   }
   const surchargeOf = (methodId: string) => {
     const m = methods.get(methodId)
@@ -785,13 +909,86 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       ? { surchargeId: m.surchargeId, rateBp: m.surchargeRateBp ?? 0 }
       : null
   }
+  // Una cotización se vende una sola vez, y solo mientras esté abierta.
+  if (input.quoteId) {
+    const q = tx.select().from(quote).where(eq(quote.id, input.quoteId)).get()
+    if (input.type !== "SALE" || !q) {
+      throw new PostingError("UNKNOWN_REFERENCE", "Solo una venta sale de una cotización")
+    }
+    if (q.status !== "open") {
+      throw new PostingError("QUOTE_CLOSED", `La cotización ${q.number} ya no está abierta`)
+    }
+  }
+  // Recargos de venta: el porcentaje y el IVA salen de su configuración, nunca del cliente; el
+  // monto de uno fijo lo puede cambiar quien vende (el delivery varía según la distancia).
+  const chargeInputs = input.charges ?? []
+  if (chargeInputs.length && input.type !== "SALE") {
+    throw new PostingError("INVALID_LINE", "Solo una venta lleva recargos (delivery, servicio…)")
+  }
+  const chargeRows = new Map(
+    (chargeInputs.length === 0
+      ? []
+      : tx
+          .select()
+          .from(saleCharge)
+          .where(
+            inArray(
+              saleCharge.id,
+              chargeInputs.map((c) => c.chargeId),
+            ),
+          )
+          .all()
+    ).map((c) => [c.id, c]),
+  )
+  const chargeTaxIds = charged
+    ? [...new Set([...chargeRows.values()].flatMap((c) => (c.taxId ? [c.taxId] : [])))]
+    : []
+  const chargeTaxes = new Map(
+    (chargeTaxIds.length === 0
+      ? []
+      : tx.select().from(tax).where(inArray(tax.id, chargeTaxIds)).all()
+    ).map((t) => [t.id, t]),
+  )
+  const suggestedInDocument = (row: typeof saleCharge.$inferSelect): number => {
+    const from = row.currency ?? input.currency
+    if (from === input.currency) return row.amountMinor
+    const base = docRate && book[docRate.base]
+    const quote = docRate && book[docRate.quote]
+    const covers =
+      docRate &&
+      ((docRate.base === from && docRate.quote === input.currency) ||
+        (docRate.quote === from && docRate.base === input.currency))
+    if (!docRate || !base || !quote || !covers) {
+      throw new PostingError(
+        "MISSING_RATE",
+        `El recargo «${row.name}» necesita la tasa para su monto`,
+      )
+    }
+    return convert(money(row.amountMinor, from), docRate, { base, quote }).amountMinor
+  }
+  const charges: DraftCharge[] = chargeInputs.map((ci) => {
+    const row = chargeRows.get(ci.chargeId)
+    if (!row?.active) {
+      throw new PostingError("UNKNOWN_REFERENCE", `Recargo desconocido o inactivo: ${ci.chargeId}`)
+    }
+    const t = row.taxId ? chargeTaxes.get(row.taxId) : undefined
+    return {
+      chargeId: row.id,
+      name: row.name,
+      kind: row.kind,
+      rateBp: row.rateBp,
+      amountMinor: row.kind === "fixed" ? (ci.amountMinor ?? suggestedInDocument(row)) : 0,
+      tax: t ? { taxId: t.id, kind: t.kind, rateBp: t.rateBp } : null,
+    }
+  })
   const draft: DocumentDraft = {
     id: input.id,
     type: input.type,
     currency: input.currency,
     legalCurrency: biz.legalCurrency,
     rate: docRate,
-    locationId: term.locationId,
+    locationId,
+    ...(toLocationId ? { toLocationId } : {}),
     pricesIncludeTax:
       input.pricesIncludeTax ?? (input.type === "SALE" ? fiscal.pricesIncludeTax : false),
     lines: input.lines.map((l) => ({
@@ -816,9 +1013,19 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
     creditCurrency,
     allocations,
     ...(allocationCurrency ? { allocationCurrency } : {}),
-    ...(input.type === "EXPENSE" ? { amountMinor: input.amountMinor ?? 0 } : {}),
+    ...(input.type === "EXPENSE" || input.type === "DEBT_IN" || input.type === "DEBT_OUT"
+      ? { amountMinor: input.amountMinor ?? 0 }
+      : {}),
+    ...(charges.length ? { charges } : {}),
   }
   const plan = planPosting(draft, book)
+  const discountCodeId = input.discountCodeId
+    ? checkDiscountCode(tx, input, plan.lines, {
+        today: localDate(ctx.now, biz.timezone),
+        docRate,
+        book,
+      })
+    : null
   // Una compra o un gasto a deber puede traer su fecha límite; si no, los días que da el proveedor.
   const explicitDue = input.type === "SALE" ? null : (input.dueAt ?? null)
   const dueAt =
@@ -833,7 +1040,8 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       type: input.type,
       number,
       terminalId: term.id,
-      locationId: term.locationId,
+      locationId,
+      toLocationId,
       currency: input.currency,
       legalCurrency: biz.legalCurrency,
       // En un documento en moneda legal la tasa no convierte nada, pero se guarda como
@@ -842,9 +1050,10 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       pricesIncludeTax: draft.pricesIncludeTax,
       shiftId,
       contactId: input.contactId ?? null,
-      returnsDocumentId: input.type === "RETURN" ? (returnOf?.id ?? null) : null,
+      returnsDocumentId: isReturn(input.type) ? (returnOf?.id ?? null) : null,
       expenseCategoryId,
       stockReasonId,
+      discountCodeId,
       discountMinor: plan.discountMinor,
       discountLegalMinor: plan.discountLegalMinor,
       creditMinor: plan.creditMinor,
@@ -884,7 +1093,7 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
     // Lo que vale la mercancía que se vende o se ajusta, congelado: base de pérdidas y utilidad. Lo
     // devuelto vale lo que costó al venderse, no el costo de hoy.
     const cost =
-      input.type === "SALE" || input.type === "ADJUSTMENT"
+      input.type === "SALE" || input.type === "ADJUSTMENT" || input.type === "STOCK_TRANSFER"
         ? variants.get(l.variantId)
         : returnedCosts?.get(l.variantId)
     tx.insert(documentLine)
@@ -898,6 +1107,17 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       .run()
   }
   insertBreakdown(tx, input.id, ctx.now, plan.taxes, plan.surcharges)
+  if (input.quoteId) {
+    tx.update(quote)
+      .set({ status: "converted", documentId: input.id, closedAt: ctx.now })
+      .where(eq(quote.id, input.quoteId))
+      .run()
+  }
+  for (const c of plan.charges) {
+    tx.insert(documentCharge)
+      .values({ id: uuidv7(ctx.now), documentId: input.id, ...c })
+      .run()
+  }
   if (input.type === "PURCHASE") updateLastCosts(tx, plan.lines, draft, ctx)
 
   // Lo que cada cobro le cuesta al comercio: la cuenta recibe el pago menos esa comisión.
@@ -937,19 +1157,107 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       .run()
   }
 
-  for (const m of plan.stockMoves) {
-    tx.insert(stockMove)
-      .values({
-        id: uuidv7(ctx.now),
-        documentId: input.id,
-        documentLineId: lineIds.get(m.lineNo) ?? "",
+  // Los productos con lotes reparten cada movimiento entre sus lotes: lo que entra va al lote de la
+  // compra (o del ajuste), lo que sale sale primero del que vence antes, lo devuelto regresa a los
+  // lotes de donde salió y un traslado lleva al destino los mismos lotes que sacó del origen. Cada
+  // parte se aplica antes de repartir la siguiente: dos líneas del mismo producto no se pisan.
+  const today = localDate(ctx.now, biz.timezone)
+  const saleable = input.type === "SALE" || input.type === "STOCK_TRANSFER"
+  const sentByLine = new Map<number, LotTake[]>()
+  const splitOf = (m: PlannedStockMove): LotTake[] => {
+    const line = input.lines[m.lineNo - 1]
+    if (!variants.get(m.variantId)?.tracksLots || !line) {
+      return [{ lotId: null, qtyMilli: m.qtyMilli }]
+    }
+    if (m.qtyMilli < 0) {
+      let out: LotTake[]
+      if (input.type === "PURCHASE_RETURN" && returnOf) {
+        // Al proveedor se le devuelve de los lotes que trajo esa compra; lo que falte, del que
+        // vence primero.
+        out = []
+        let left = -m.qtyMilli
+        for (const t of purchaseLots(tx, returnOf.id, m.variantId, m.locationId)) {
+          if (left <= 0) break
+          const qty = Math.min(left, t.qtyMilli)
+          out.push({ lotId: t.lotId, qtyMilli: -qty })
+          left -= qty
+        }
+        if (left > 0) {
+          for (const t of allocateOut(tx, m.variantId, m.locationId, left, today, false)) {
+            out.push({ lotId: t.lotId, qtyMilli: -t.qtyMilli })
+          }
+        }
+      } else if (line.lotId) {
+        const left = lotQty(tx, line.lotId, m.locationId)
+        if (left < -m.qtyMilli) {
+          throw new PostingError(
+            "INSUFFICIENT_STOCK",
+            `Del lote elegido solo quedan ${left / 1000} en esa ubicación`,
+          )
+        }
+        out = [{ lotId: line.lotId, qtyMilli: m.qtyMilli }]
+      } else {
+        out = allocateOut(tx, m.variantId, m.locationId, -m.qtyMilli, today, saleable).map((t) => ({
+          lotId: t.lotId,
+          qtyMilli: -t.qtyMilli,
+        }))
+      }
+      sentByLine.set(m.lineNo, out)
+      return out
+    }
+    if (input.type === "STOCK_TRANSFER") {
+      return (sentByLine.get(m.lineNo) ?? []).map((t) => ({
+        lotId: t.lotId,
+        qtyMilli: -t.qtyMilli,
+      }))
+    }
+    if (line.lot) {
+      const lotId = lotFor(tx, {
         variantId: m.variantId,
-        locationId: m.locationId,
-        qtyMilli: m.qtyMilli,
-        createdAt: ctx.now,
+        code: line.lot.code?.trim() || null,
+        expiresOn: line.lot.expiresOn,
+        documentId: input.id,
+        now: ctx.now,
       })
-      .run()
-    applyStockMove(tx, m, ctx)
+      return [{ lotId, qtyMilli: m.qtyMilli }]
+    }
+    if (line.lotId) return [{ lotId: line.lotId, qtyMilli: m.qtyMilli }]
+    if (input.type === "RETURN" && returnOf) {
+      const out: LotTake[] = []
+      let left = m.qtyMilli
+      for (const t of returnableLots(tx, returnOf.id, m.variantId)) {
+        if (left <= 0) break
+        const qty = Math.min(left, t.qtyMilli)
+        out.push({ lotId: t.lotId, qtyMilli: qty })
+        left -= qty
+      }
+      if (left > 0) out.push({ lotId: null, qtyMilli: left })
+      return out
+    }
+    return [{ lotId: null, qtyMilli: m.qtyMilli }]
+  }
+  for (const m of plan.stockMoves) {
+    for (const part of splitOf(m)) {
+      const move = { variantId: m.variantId, locationId: m.locationId, qtyMilli: part.qtyMilli }
+      tx.insert(stockMove)
+        .values({
+          id: uuidv7(ctx.now),
+          documentId: input.id,
+          documentLineId: lineIds.get(m.lineNo) ?? "",
+          ...move,
+          lotId: part.lotId,
+          createdAt: ctx.now,
+        })
+        .run()
+      applyStockMove(tx, move, ctx)
+      if (part.lotId) {
+        applyLotMove(
+          tx,
+          { lotId: part.lotId, locationId: m.locationId, qtyMilli: part.qtyMilli },
+          ctx.allowNegativeStock,
+        )
+      }
+    }
   }
 
   for (const m of plan.accountMoves) {
@@ -1005,6 +1313,89 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
 }
 
 /**
+ * Valida el código de descuento de una venta: activo, vigente hoy y con usos disponibles. Si quien
+ * vende no puede dar descuentos a mano, los descuentos de la venta no pasan de lo que da el código
+ * (un porcentaje del ticket o un monto fijo llevado a la moneda de la venta). Devuelve su id.
+ */
+function checkDiscountCode(
+  tx: Tx,
+  input: PostDocumentInput,
+  lines: readonly PlannedLine[],
+  opts: { today: string; docRate: ExchangeRate | null; book: CurrencyBook },
+): string {
+  if (input.type !== "SALE") {
+    throw new PostingError("INVALID_LINE", "Solo una venta lleva código de descuento")
+  }
+  const code = tx
+    .select()
+    .from(discountCode)
+    .where(eq(discountCode.id, input.discountCodeId ?? ""))
+    .get()
+  if (!code?.active) {
+    throw new PostingError(
+      "UNKNOWN_REFERENCE",
+      "El código de descuento no existe o está desactivado",
+    )
+  }
+  if (
+    (code.validFrom && opts.today < code.validFrom) ||
+    (code.validUntil && opts.today > code.validUntil)
+  ) {
+    throw new PostingError("DISCOUNT_DENIED", `El código ${code.code} no está vigente hoy`)
+  }
+  if (code.maxUses !== null && discountCodeUses(tx, code.id) >= code.maxUses) {
+    throw new PostingError("DISCOUNT_DENIED", `El código ${code.code} ya se usó todas las veces`)
+  }
+  if (input.discountFromCodeOnly) {
+    const pool = lines.reduce((acc, l) => acc + lineTotal(l.qtyMilli, l.unitPriceMinor), 0)
+    let allowed: number
+    if (code.kind === "percent") {
+      // El mismo redondeo que la caja: la mitad hacia arriba.
+      allowed = commissionMinor(pool, code.rateBp)
+    } else {
+      const from = code.currency ?? input.currency
+      const rate = opts.docRate
+      const base = rate ? opts.book[rate.base] : undefined
+      const quote = rate ? opts.book[rate.quote] : undefined
+      if (from === input.currency) {
+        allowed = code.amountMinor
+      } else if (rate && base && quote && (rate.base === from || rate.quote === from)) {
+        allowed = convert(money(code.amountMinor, from), rate, { base, quote }).amountMinor
+      } else {
+        throw new PostingError("MISSING_RATE", `El código ${code.code} necesita la tasa del día`)
+      }
+    }
+    const given = lines.reduce((acc, l) => acc + l.discountMinor, 0)
+    if (given > Math.min(pool, allowed)) {
+      throw new PostingError(
+        "DISCOUNT_DENIED",
+        `El código ${code.code} no da tanto descuento: pide a quien pueda dar descuentos`,
+      )
+    }
+  }
+  return code.id
+}
+
+/** Ventas vigentes que usaron un código (sin reversos ni anuladas). */
+export function discountCodeUses(db: Pick<Db, "select">, codeId: string): number {
+  const reversal = alias(document, "reversal")
+  return (
+    db
+      .select({ n: sql<number>`count(*)` })
+      .from(document)
+      .leftJoin(reversal, eq(reversal.reversesDocumentId, document.id))
+      .where(
+        and(
+          eq(document.discountCodeId, codeId),
+          isNull(document.reversesDocumentId),
+          isNull(reversal.id),
+        ),
+      )
+      .get()?.n ?? 0
+  )
+}
+
+/**
  * Anula un documento contabilizado generando un documento de reverso con todo en signo
  * contrario. El original no se toca. Solo se puede anular una vez y un reverso no se anula.
  * `reversalId` es un UUIDv7 del cliente, así que reintentar es idempotente.
@@ -1043,14 +1434,17 @@ export function voidDocument(
         throw new PostingError("ALREADY_REVERSED", `El documento ${original.number} ya fue anulado`)
       }
 
-      if (original.type === "SALE" && activeReturns(tx, original.id) > 0) {
+      if (
+        (original.type === "SALE" || original.type === "PURCHASE") &&
+        activeReturns(tx, original.id) > 0
+      ) {
         throw new PostingError(
           "HAS_RETURNS",
-          `La venta ${original.number} tiene devoluciones: anúlalas primero`,
+          `${original.number} tiene devoluciones: anúlalas primero`,
         )
       }
       if (
-        original.type === "SALE" &&
+        (original.type === "SALE" || original.type === "DEBT_IN") &&
         original.creditMinor > 0 &&
         collectedOn(tx, original.id) !== 0
       ) {
@@ -1060,7 +1454,9 @@ export function voidDocument(
         )
       }
       if (
-        (original.type === "PURCHASE" || original.type === "EXPENSE") &&
+        (original.type === "PURCHASE" ||
+          original.type === "EXPENSE" ||
+          original.type === "DEBT_OUT") &&
         original.creditMinor > 0 &&
         collectedOn(tx, original.id) !== 0
       ) {
@@ -1143,6 +1539,25 @@ export function voidDocument(
           .run()
       }
 
+      // Los recargos (delivery, servicio) se devuelven con la venta.
+      for (const c of tx
+        .select()
+        .from(documentCharge)
+        .where(eq(documentCharge.documentId, original.id))
+        .orderBy(asc(documentCharge.position))
+        .all()) {
+        tx.insert(documentCharge)
+          .values({
+            ...c,
+            id: uuidv7(ctx.now),
+            documentId: reversalId,
+            baseMinor: negate(c.baseMinor),
+            amountMinor: negate(c.amountMinor),
+            amountLegalMinor: negate(c.amountLegalMinor),
+          })
+          .run()
+      }
+
       const paymentIds = new Map<string, string>()
       for (const p of tx.select().from(payment).where(eq(payment.documentId, original.id)).all()) {
         const id = uuidv7(ctx.now)
@@ -1190,10 +1605,18 @@ export function voidDocument(
             documentId: reversalId,
             documentLineId: lineIds.get(m.documentLineId) ?? "",
             ...reverse,
+            lotId: m.lotId,
             createdAt: ctx.now,
           })
           .run()
         applyStockMove(tx, reverse, ctx)
+        if (m.lotId) {
+          applyLotMove(
+            tx,
+            { lotId: m.lotId, locationId: m.locationId, qtyMilli: -m.qtyMilli },
+            ctx.allowNegativeStock,
+          )
+        }
       }
 
       for (const m of tx

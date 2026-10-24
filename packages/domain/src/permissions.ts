@@ -74,6 +74,10 @@ const POST_PERMISSION: Partial<Record<DocumentType, Permission>> = {
   ADJUSTMENT: "inventory.adjust",
   CASH_IN: "shift.manage",
   CASH_OUT: "shift.manage",
+  DEBT_IN: "finance.manage",
+  DEBT_OUT: "payable.manage",
+  STOCK_TRANSFER: "inventory.adjust",
+  PURCHASE_RETURN: "purchase.void",
 }
 
 const VOID_PERMISSION: Partial<Record<DocumentType, Permission>> = {
@@ -87,6 +91,10 @@ const VOID_PERMISSION: Partial<Record<DocumentType, Permission>> = {
   ADJUSTMENT: "inventory.adjust",
   CASH_IN: "finance.manage",
   CASH_OUT: "finance.manage",
+  DEBT_IN: "finance.manage",
+  DEBT_OUT: "payable.manage",
+  STOCK_TRANSFER: "inventory.adjust",
+  PURCHASE_RETURN: "purchase.void",
 }
 
 /** Permiso que exige contabilizar un documento de este tipo. */

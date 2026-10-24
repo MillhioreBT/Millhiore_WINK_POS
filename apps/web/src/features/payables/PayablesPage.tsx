@@ -15,12 +15,13 @@ import {
   TableRow,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
-import { HandCoinsIcon, SearchIcon } from "lucide-react"
+import { HandCoinsIcon, PlusIcon, SearchIcon } from "lucide-react"
 import { useMemo, useState } from "react"
 import { AgingBar } from "../../components/AgingBar"
 import { formatDateTime, formatMoney } from "../../lib/format"
 import { bootstrapQuery, documentsQuery, payablesQuery, rateStatusQuery } from "../../lib/queries"
 import { can, useMe } from "../../lib/session"
+import { DebtDialog } from "../receivables/DebtDialog"
 import { ReceiptDialog } from "../sales/ReceiptDialog"
 import { DocumentDialog } from "../sales/SalesPage"
 import { PayDialog } from "./PayDialog"
@@ -37,6 +38,7 @@ export function PayablesPage() {
   const [paying, setPaying] = useState<string | null>(null)
   const [receiptId, setReceiptId] = useState<string | null>(null)
   const [open, setOpen] = useState<DocumentSummary | null>(null)
+  const [addingDebt, setAddingDebt] = useState(false)
   // Los pagos de los últimos 60 días, por si hay que ver el comprobante o anular uno equivocado.
   // La fecha se fija una vez: si cambiara en cada render, la consulta se repetiría sin parar.
   const [since] = useState(() => Date.now() - 60 * 86_400_000)
@@ -67,7 +69,17 @@ export function PayablesPage() {
     <div className="grid grid-cols-1 gap-4">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="font-semibold text-xl">Por pagar</h1>
-        <div className="relative ml-auto w-full sm:w-72">
+        {canPay ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className="ml-auto sm:order-last sm:ml-0"
+            onClick={() => setAddingDebt(true)}
+          >
+            <PlusIcon /> Anotar deuda
+          </Button>
+        ) : null}
+        <div className="relative w-full sm:ml-auto sm:w-72">
           <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={search}
@@ -140,7 +152,7 @@ export function PayablesPage() {
                     ? "Cargando…"
                     : search
                       ? "Nadie coincide con la búsqueda."
-                      : "Cuando dejes a deber una compra o un gasto aparecerá aquí."}
+                      : "Cuando dejes a deber una compra o un gasto, o anotes lo que ya debías, aparecerá aquí."}
                 </TableCell>
               </TableRow>
             ) : null}
@@ -154,7 +166,7 @@ export function PayablesPage() {
                     </Badge>
                   ) : null}
                   <span className="block font-normal text-muted-foreground text-xs">
-                    {s.openCount} factura{s.openCount === 1 ? "" : "s"}
+                    {s.openCount} por pagar
                     <span className="sm:hidden"> · desde {day(s.oldestPostedAt)}</span>
                   </span>
                 </TableCell>
@@ -240,6 +252,13 @@ export function PayablesPage() {
             setPaying(null)
             setReceiptId(id)
           }}
+        />
+      ) : null}
+      {addingDebt ? (
+        <DebtDialog
+          type="DEBT_OUT"
+          onClose={() => setAddingDebt(false)}
+          onPosted={() => setAddingDebt(false)}
         />
       ) : null}
       <ReceiptDialog documentId={receiptId} onClose={() => setReceiptId(null)} done="Listo" />

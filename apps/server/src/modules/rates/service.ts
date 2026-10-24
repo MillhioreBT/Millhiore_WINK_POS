@@ -22,7 +22,7 @@ export const STALE_AFTER_MS = 5 * 24 * 60 * 60 * 1000
 const LAST_CHECK_KEY = "rates.lastCheck"
 
 /** A igual vigencia manda la manual, luego el BCV (8 decimales) y por último el espejo. */
-const SOURCE_PRIORITY = sql`case ${exchangeRate.source} when 'manual' then 0 when 'bcv' then 1 else 2 end`
+export const SOURCE_PRIORITY = sql`case ${exchangeRate.source} when 'manual' then 0 when 'bcv' then 1 else 2 end`
 
 export interface LastCheck {
   at: number
@@ -57,7 +57,9 @@ export function rateAt(
     .get()
 }
 
-export function getBusinessPair(db: Db): { base: string; quote: string } | undefined {
+export function getBusinessPair(
+  db: Pick<Db, "select">,
+): { base: string; quote: string } | undefined {
   const biz = db.select().from(business).get()
   return biz ? { base: biz.referenceCurrency, quote: biz.legalCurrency } : undefined
 }

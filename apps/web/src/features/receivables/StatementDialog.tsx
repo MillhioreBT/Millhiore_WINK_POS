@@ -93,11 +93,12 @@ export function StatementDialog({
 
             {data.open.length ? (
               <section>
-                <h3 className="mb-1 font-medium text-sm">Ventas por cobrar</h3>
+                <h3 className="mb-1 font-medium text-sm">Por cobrar</h3>
                 <ul className="divide-y rounded-lg border text-sm">
                   {data.open.map((s) => (
                     <li key={s.id} className="grid grid-cols-[1fr_auto] gap-x-3 px-3 py-2">
                       <span className="font-medium">
+                        {s.kind === "DEBT_IN" ? `${s.label} · ` : ""}
                         {s.number}
                         {s.overdue ? (
                           <Badge variant="destructive" className="ml-2">
@@ -133,7 +134,8 @@ export function StatementDialog({
                       className={`flex items-baseline justify-between gap-3 px-3 py-2 ${m.voided ? "text-muted-foreground line-through" : ""}`}
                     >
                       <span>
-                        {m.type === "SALE" ? "Fiado" : "Abono"} {m.number}
+                        {m.type === "SALE" ? "Fiado" : m.type === "DEBT_IN" ? "Deuda" : "Abono"}{" "}
+                        {m.number}
                         <span className="ml-2 text-muted-foreground text-xs">
                           {formatDateTime(m.postedAt)}
                         </span>

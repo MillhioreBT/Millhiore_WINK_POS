@@ -31,8 +31,9 @@ import {
   receivablesQuery,
   recurringQuery,
 } from "../../lib/queries"
-import { can, useMe } from "../../lib/session"
+import { can, useFeatures, useMe } from "../../lib/session"
 import { ClosingDialog } from "./ClosingDialog"
+import { OnboardingCard } from "./OnboardingCard"
 
 const HOUR = 3_600_000
 
@@ -239,13 +240,14 @@ function PayablesCard() {
 export function DashboardPage() {
   const me = useMe()
   const { data: boot } = useQuery(bootstrapQuery)
+  const features = useFeatures()
   const [date, setDate] = useState<string | undefined>(undefined)
   const [closing, setClosing] = useState(false)
   const summary = useQuery(daySummaryQuery(date))
   // Gastos recurrentes que vencieron y esperan que alguien los registre.
   const recurring = useQuery({
     ...recurringQuery,
-    enabled: can(me, "expense.create", "finance.view", "report.view"),
+    enabled: features.recurring && can(me, "expense.create", "finance.view", "report.view"),
   })
   const waiting = (recurring.data ?? []).filter((r) => r.due && (!r.auto || r.lastError)).length
   const s = summary.data
@@ -256,6 +258,7 @@ export function DashboardPage() {
 
   return (
     <div className="grid grid-cols-1 gap-4">
+      {can(me, "settings.manage") ? <OnboardingCard /> : null}
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="mr-auto font-semibold text-xl">
           {isToday ? "Hoy" : "Resumen"}
@@ -364,6 +367,17 @@ export function DashboardPage() {
               {s.expenses.count
                 ? `${s.expenses.count} gasto${s.expenses.count === 1 ? "" : "s"} pagado${s.expenses.count === 1 ? "" : "s"}`
                 : "Sin gastos"}
+              {s.inventoryLossLegalMinor ? (
+                <Link
+                  to="/inventario"
+                  className="mt-1 block text-destructive underline-offset-4 hover:underline"
+                >
+                  Pérdidas de inventario{" "}
+                  <span className="tabular">
+                    {formatMoney(s.inventoryLossLegalMinor, s.legalCurrency)}
+                  </span>
+                </Link>
+              ) : null}
               {waiting > 0 ? (
                 <Link
                   to="/gastos"
@@ -489,6 +503,25 @@ export function DashboardPage() {
                       <PackageXIcon className="size-4" /> Nada por reponer.
                     </p>
                   )}
+                  {s.expiry && (s.expiry.expiredLots || s.expiry.expiringLots) ? (
+                    <Link
+                      to="/vencimientos"
+                      className="mt-3 block text-sm underline-offset-4 hover:underline"
+                    >
+                      {s.expiry.expiredLots ? (
+                        <span className="font-medium text-destructive">
+                          {s.expiry.expiredLots} lote{s.expiry.expiredLots === 1 ? "" : "s"} vencido
+                          {s.expiry.expiredLots === 1 ? "" : "s"}
+                        </span>
+                      ) : null}
+                      {s.expiry.expiredLots && s.expiry.expiringLots ? " · " : null}
+                      {s.expiry.expiringLots ? (
+                        <span className="text-warning-foreground dark:text-warning">
+                          {s.expiry.expiringLots} por vencer en {s.expiry.alertDays} días
+                        </span>
+                      ) : null}
+                    </Link>
+                  ) : null}
                   <Link
                     to="/productos"
                     className="mt-3 inline-block text-primary text-sm underline-offset-4 hover:underline"

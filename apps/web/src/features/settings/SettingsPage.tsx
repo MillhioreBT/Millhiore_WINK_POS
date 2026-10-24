@@ -30,6 +30,7 @@ import {
   TabsTrigger,
 } from "@millhiore/ui"
 import { queryOptions, useQuery } from "@tanstack/react-query"
+import { useSearch } from "@tanstack/react-router"
 import {
   DatabaseBackupIcon,
   DownloadIcon,
@@ -56,11 +57,14 @@ import {
   type UserRow,
   usersQuery,
 } from "../../lib/queries"
-import { can, useMe } from "../../lib/session"
+import { can, useFeatures, useMe } from "../../lib/session"
 import { SessionsPanel } from "../account/SessionsPanel"
 import { EditUserDialog, ResetPasswordDialog } from "../account/UserDialogs"
 import { BusinessHeader } from "../sales/ReceiptDialog"
 import { AuditTab } from "./AuditTab"
+import { ChargesCard } from "./ChargesCard"
+import { FeaturesCard } from "./FeaturesCard"
+import { LocationsCard } from "./LocationsCard"
 
 const SOURCE: Record<string, string> = {
   bcv: "BCV",
@@ -280,6 +284,7 @@ function RateEditor({
 }
 
 function TaxesTab() {
+  const bootFeatures = useFeatures()
   const fiscal = useQuery(fiscalQuery)
   const taxes = useQuery(taxesQuery)
   const surcharges = useQuery(surchargesQuery)
@@ -421,6 +426,7 @@ function TaxesTab() {
           </Table>
         </CardContent>
       </Card>
+      {bootFeatures.charges ? <ChargesCard canManage /> : null}
     </div>
   )
 }
@@ -605,11 +611,13 @@ const businessQuery = queryOptions({
 
 function BusinessTab() {
   const profile = useQuery(businessQuery)
+  const features = useFeatures()
   if (!profile.data) return <p className="text-muted-foreground">Cargando…</p>
   return (
     <div className="grid grid-cols-1 gap-4">
       <BusinessForm key={JSON.stringify(profile.data)} profile={profile.data} />
-      <CreditCard />
+      <FeaturesCard />
+      {features.locations ? <LocationsCard /> : null}
       <SecurityCard />
     </div>
   )
@@ -669,49 +677,6 @@ function SecurityCard() {
 }
 
 /** Si el negocio vende a crédito. Desactivarlo no borra lo que ya se debe. */
-function CreditCard() {
-  const boot = useQuery(bootstrapQuery)
-  const enabled = boot.data?.credit.enabled ?? true
-  const toggle = async (next: boolean) => {
-    try {
-      await api("/api/settings/credit", { method: "PUT", body: { enabled: next } })
-      await queryClient.invalidateQueries({ queryKey: ["bootstrap"] })
-      toast.success(next ? "Fiado activado" : "Fiado desactivado")
-    } catch (e) {
-      toast.error(errorMessage(e))
-    }
-  }
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Fiado</CardTitle>
-        <CardDescription>
-          Vender a crédito a clientes registrados, con sus abonos y días para pagar.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-start gap-3">
-          <input
-            id="credit-enabled"
-            type="checkbox"
-            className="mt-0.5 size-4 accent-[var(--primary)]"
-            checked={enabled}
-            disabled={!boot.data}
-            onChange={(e) => toggle(e.target.checked)}
-          />
-          <div className="grid grid-cols-1 gap-1">
-            <Label htmlFor="credit-enabled">Permitir vender a crédito (fiado)</Label>
-            <p className="text-muted-foreground text-xs">
-              Si lo desmarcas, no se pueden fiar ventas nuevas; lo que ya se debe se sigue cobrando.
-              Los días para pagar y el límite de deuda se ponen en cada cliente.
-            </p>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
 function BusinessForm({ profile }: { profile: BusinessProfile }) {
   const [form, setForm] = useState({
     name: profile.name,
@@ -1231,6 +1196,7 @@ function BackupsTab() {
 
 export function SettingsPage() {
   const me = useMe()
+  const { tab } = useSearch({ from: "/app/ajustes" })
   const tabs = [
     { id: "negocio", label: "Negocio", show: can(me, "settings.manage") },
     { id: "tasa", label: "Tasa de cambio", show: true },
@@ -1244,7 +1210,10 @@ export function SettingsPage() {
   return (
     <div className="grid grid-cols-1 gap-4">
       <h1 className="font-semibold text-xl">Ajustes</h1>
-      <Tabs defaultValue={tabs[0]?.id ?? "tasa"}>
+      <Tabs
+        key={tab ?? ""}
+        defaultValue={tabs.find((t) => t.id === tab)?.id ?? tabs[0]?.id ?? "tasa"}
+      >
         <TabsList>
           {tabs.map((t) => (
             <TabsTrigger key={t.id} value={t.id}>

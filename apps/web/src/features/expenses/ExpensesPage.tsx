@@ -34,7 +34,7 @@ import {
   rateStatusQuery,
   recurringQuery,
 } from "../../lib/queries"
-import { can, useMe } from "../../lib/session"
+import { can, useFeatures, useMe } from "../../lib/session"
 import { ReceiptDialog } from "../sales/ReceiptDialog"
 import { DocumentDialog } from "../sales/SalesPage"
 import { ExpenseCategoriesDialog } from "./ExpenseCategoriesDialog"
@@ -57,6 +57,7 @@ function presetRange(id: (typeof PRESETS)[number]["id"], today: string) {
 export function ExpensesPage() {
   const me = useMe()
   const boot = useQuery(bootstrapQuery)
+  const features = useFeatures()
   const rate = useQuery(rateStatusQuery)
   const categories = useQuery(expenseCategoriesQuery({ all: true }))
   const today = todayInCaracas()
@@ -115,14 +116,16 @@ export function ExpensesPage() {
       <Tabs defaultValue="gastos">
         <TabsList>
           <TabsTrigger value="gastos">Gastos</TabsTrigger>
-          <TabsTrigger value="recurrentes">
-            Recurrentes
-            {waiting > 0 ? (
-              <Badge variant="warning" className="ml-2">
-                {waiting}
-              </Badge>
-            ) : null}
-          </TabsTrigger>
+          {features.recurring ? (
+            <TabsTrigger value="recurrentes">
+              Recurrentes
+              {waiting > 0 ? (
+                <Badge variant="warning" className="ml-2">
+                  {waiting}
+                </Badge>
+              ) : null}
+            </TabsTrigger>
+          ) : null}
         </TabsList>
         <TabsContent value="recurrentes">
           <RecurringTab onPosted={setReceiptId} />

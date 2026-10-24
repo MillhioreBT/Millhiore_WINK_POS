@@ -50,7 +50,14 @@ const sale: DocumentDetail = {
   creditMinor: 0,
   creditCurrency: null,
   dueAt: null,
+  terminalName: "Caja 1",
+  locationId: "l",
+  locationName: "Tienda",
+  toLocationId: null,
+  toLocationName: null,
+  discountCode: null,
   allocations: [],
+  charges: [],
   rate: { base: "USD", quote: "VES", value: "877.90230000" },
   pricesIncludeTax: true,
   lines: [
@@ -64,6 +71,7 @@ const sale: DocumentDetail = {
       lineTotalMinor: 203674,
       taxId: "G",
       taxRateBp: 1600,
+      lots: [],
     },
     {
       lineNo: 2,
@@ -75,6 +83,7 @@ const sale: DocumentDetail = {
       lineTotalMinor: 105348,
       taxId: "E",
       taxRateBp: 0,
+      lots: [],
     },
   ],
   payments: [
@@ -215,6 +224,57 @@ describe("recibo", () => {
     expect(toPlainText(receiptLines(sale, business, 48), 48)).not.toContain("Descuento")
   })
 
+  test("los recargos de la venta salen después de los productos", () => {
+    const withCharges: DocumentDetail = {
+      ...sale,
+      charges: [
+        {
+          chargeId: "delivery",
+          name: "Delivery",
+          kind: "fixed",
+          rateBp: 0,
+          baseMinor: 0,
+          amountMinor: 175580,
+          amountLegalMinor: 175580,
+          taxId: null,
+          taxRateBp: 0,
+        },
+        {
+          chargeId: "servicio",
+          name: "Servicio",
+          kind: "percent",
+          rateBp: 1000,
+          baseMinor: 175582,
+          amountMinor: 17558,
+          amountLegalMinor: 17558,
+          taxId: "exento",
+          taxRateBp: 0,
+        },
+      ],
+    }
+    const text = toPlainText(receiptLines(withCharges, business, 48), 48)
+    expect(text).toMatch(/Delivery\s+Bs 1\.755,80/)
+    expect(text).toMatch(/Servicio 10 % \(E\)\s+Bs 175,58/)
+    expect(text.indexOf("Delivery")).toBeGreaterThan(text.indexOf("Agua mineral"))
+    // Con IVA, lo que no lo lleva sale aparte como no sujeto para que el desglose sume el total.
+    const noVat: DocumentDetail = {
+      ...withCharges,
+      taxes: [
+        ...sale.taxes,
+        {
+          taxId: null,
+          kind: "not_subject",
+          rateBp: 0,
+          baseMinor: 175580,
+          taxMinor: 0,
+          baseLegalMinor: 175580,
+          taxLegalMinor: 0,
+        },
+      ],
+    }
+    expect(toPlainText(receiptLines(noVat, business, 48), 48)).toMatch(/No sujeto {2,}Bs 1\.755,80/)
+  })
+
   test("el recibo de un abono lista las ventas que paga", () => {
     const abono: DocumentDetail = {
       ...sale,
@@ -238,6 +298,37 @@ describe("recibo", () => {
     expect(text).toMatch(/C1-000007\s+\$ 2,00/)
     expect(text).toMatch(/ABONO\s+\$ 3,00/)
     expect(text).toContain("¡Gracias por su compra!")
+  })
+
+  test("un traslado dice de dónde a dónde y las cantidades, sin precios", () => {
+    const traslado: DocumentDetail = {
+      ...sale,
+      type: "STOCK_TRANSFER",
+      number: "C1-TL-000001",
+      totalMinor: 0,
+      surchargeMinor: 0,
+      contactName: null,
+      locationName: "Depósito",
+      toLocationName: "Tienda",
+      lines: (sale.lines ?? []).map((l) => ({ ...l, unitPriceMinor: 0, lineTotalMinor: 0 })),
+      payments: [],
+      taxes: [],
+      surcharges: [],
+    }
+    const text = toPlainText(receiptLines(traslado, business, 48), 48)
+    expect(text).toContain("TRASLADO DE INVENTARIO")
+    expect(text).toContain("De: Depósito")
+    expect(text).toContain("A: Tienda")
+    expect(text).toMatch(/UNIDADES\s+3/)
+    expect(text).not.toContain("Bs")
+    expect(text).not.toContain("¡Gracias por su compra!")
+    // El reverso devuelve la mercancía: de la tienda al depósito.
+    const back = toPlainText(
+      receiptLines({ ...traslado, reversesDocumentId: "d1" }, business, 48),
+      48,
+    )
+    expect(back).toContain("De: Tienda")
+    expect(back).toContain("ANULACIÓN")
   })
 
   test("el mensaje del pie es el del negocio", () => {

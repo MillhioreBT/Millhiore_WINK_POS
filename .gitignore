@@ -11,6 +11,7 @@ target/
 
 # Datos locales: bases de datos, respaldos y la carpeta de datos del servidor en desarrollo
 /data/
+apps/server/data/
 *.db
 *.db-wal
 *.db-shm

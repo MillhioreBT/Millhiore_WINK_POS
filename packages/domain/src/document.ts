@@ -3,6 +3,7 @@ import type { Currency, CurrencyCode } from "./currency"
 import { money, roundToInteger } from "./money"
 import { convert, convertExact, type ExchangeRate } from "./rate"
 import {
+  applyRate,
   computeSurcharges,
   computeTaxes,
   isValidLineTax,
@@ -25,6 +26,10 @@ export const DOCUMENT_TYPES = [
   "PAYMENT_OUT",
   "CASH_IN",
   "CASH_OUT",
+  "DEBT_IN",
+  "DEBT_OUT",
+  "STOCK_TRANSFER",
+  "PURCHASE_RETURN",
 ] as const
 export type DocumentType = (typeof DOCUMENT_TYPES)[number]
 
@@ -40,11 +45,23 @@ export const POSTABLE_TYPES = [
   "EXPENSE",
   "PAYMENT_OUT",
   "TRANSFER",
+  "DEBT_IN",
+  "DEBT_OUT",
+  "STOCK_TRANSFER",
+  "PURCHASE_RETURN",
 ] as const
 export type PostableType = (typeof POSTABLE_TYPES)[number]
 
 export function isPostableType(type: string): type is PostableType {
   return (POSTABLE_TYPES as readonly string[]).includes(type)
+}
+
+/**
+ * Devoluciones: de un cliente (`RETURN`, de una venta) o a un proveedor (`PURCHASE_RETURN`, de una
+ * compra). Pueden descontarse de lo que se debe de ese documento en vez de mover dinero.
+ */
+export function isReturn(type: string): type is "RETURN" | "PURCHASE_RETURN" {
+  return type === "RETURN" || type === "PURCHASE_RETURN"
 }
 
 /** Ingresos y retiros de caja: solo mueven dinero, sin líneas ni impuestos. */
@@ -72,6 +89,8 @@ export type PostingErrorCode =
   | "NOT_RETURNABLE"
   | "HAS_RETURNS"
   | "HAS_PAYMENTS"
+  | "QUOTE_CLOSED"
+  | "DISCOUNT_DENIED"
 
 export class PostingError extends Error {
   constructor(
@@ -94,6 +113,10 @@ const SERIES_TAG: Record<DocumentType, string> = {
   PAYMENT_OUT: "PG",
   CASH_IN: "IC",
   CASH_OUT: "RC",
+  DEBT_IN: "CC",
+  DEBT_OUT: "CP",
+  STOCK_TRANSFER: "TL",
+  PURCHASE_RETURN: "DC",
 }
 
 /** Número de documento en la serie de su terminal: C1-000123 (ventas) o C1-CM-000123 (compras). */
@@ -135,6 +158,38 @@ export interface DraftPayment {
   surcharge: PaymentSurcharge | null
 }
 
+/**
+ * Recargo de venta (delivery, servicio…). Uno fijo suma su monto como una línea más (con el IVA
+ * incluido si los precios lo incluyen); uno porcentual se calcula sobre el subtotal sin IVA de las
+ * líneas y, si lleva IVA, se le suma encima. Solo en ventas.
+ */
+export interface DraftCharge {
+  chargeId: string
+  name: string
+  kind: "percent" | "fixed"
+  /** Porcentual: centésimas de punto sobre el subtotal sin IVA. */
+  rateBp: number
+  /** Fijo: el monto en la moneda del documento. */
+  amountMinor: number
+  /** IVA del recargo, resuelto por el servidor; null = no lleva IVA. */
+  tax: LineTax | null
+}
+
+export interface PlannedCharge {
+  position: number
+  chargeId: string
+  name: string
+  kind: "percent" | "fixed"
+  rateBp: number
+  /** Porcentual: el subtotal sin IVA sobre el que se calculó; fijo: 0. */
+  baseMinor: number
+  /** Lo que suma al documento, como el total de una línea. */
+  amountMinor: number
+  amountLegalMinor: number
+  taxId: string | null
+  taxRateBp: number
+}
+
 /** Parte de un abono que paga una venta a crédito, en la moneda de ambos documentos. */
 export interface DraftAllocation {
   saleDocumentId: string
@@ -150,7 +205,10 @@ export interface DocumentDraft {
   legalCurrency: CurrencyCode
   /** Tasa con la que se calcula el total en moneda legal si difiere de `currency`. */
   rate: ExchangeRate | null
+  /** Ubicación cuya existencia mueve el documento (en un traslado, el origen). */
   locationId: string
+  /** Traslado (`STOCK_TRANSFER`): la ubicación a la que llega la mercancía. */
+  toLocationId?: string
   /** Si los precios de las líneas ya traen el IVA (precio de vitrina) o se le suma aparte. */
   pricesIncludeTax: boolean
   lines: readonly DraftLine[]
@@ -175,6 +233,8 @@ export interface DocumentDraft {
    * es este monto y los pagos tienen que cubrirlo.
    */
   amountMinor?: number
+  /** Recargos de venta (delivery, servicio…). Solo en ventas. */
+  charges?: readonly DraftCharge[]
 }
 
 export interface PlannedLine {
@@ -225,6 +285,70 @@ export interface PostingPlan {
   creditLegalMinor: number
   /** Ventas que paga un abono, con el monto de cada una. */
   allocations: DraftAllocation[]
+  /** Recargos de venta, ya calculados; los de monto cero no se guardan. */
+  charges: PlannedCharge[]
+}
+
+/**
+ * Calcula los recargos de una venta. `lineTaxes` es el desglose de IVA de sus líneas (sin los
+ * recargos): de ahí sale el subtotal sin IVA sobre el que se aplican los porcentuales.
+ */
+export function planCharges(
+  charges: readonly DraftCharge[],
+  lineTaxes: readonly TaxGroup[],
+  pricesIncludeTax: boolean,
+  toLegal: ToLegal,
+): PlannedCharge[] {
+  const subtotalBase = lineTaxes.reduce((acc, t) => acc + t.baseMinor, 0)
+  const seen = new Set<string>()
+  const out: PlannedCharge[] = []
+  for (const c of charges) {
+    if (seen.has(c.chargeId)) {
+      throw new PostingError("INVALID_LINE", `El recargo «${c.name}» aparece dos veces`)
+    }
+    seen.add(c.chargeId)
+    if (c.tax && !isValidLineTax(c.tax)) {
+      throw new PostingError("INVALID_LINE", `Impuesto inválido en el recargo «${c.name}»`)
+    }
+    const taxRateBp = c.tax?.rateBp ?? 0
+    let baseMinor = 0
+    let amountMinor: number
+    if (c.kind === "percent") {
+      if (!Number.isSafeInteger(c.rateBp) || c.rateBp <= 0 || c.rateBp > 10_000) {
+        throw new PostingError("INVALID_LINE", `Porcentaje inválido en el recargo «${c.name}»`)
+      }
+      baseMinor = subtotalBase
+      const net = applyRate(subtotalBase, c.rateBp)
+      amountMinor = pricesIncludeTax ? net + applyRate(net, taxRateBp) : net
+    } else {
+      if (!Number.isSafeInteger(c.amountMinor) || c.amountMinor < 0) {
+        throw new PostingError("INVALID_LINE", `Monto inválido en el recargo «${c.name}»`)
+      }
+      amountMinor = c.amountMinor
+    }
+    if (amountMinor === 0) continue
+    out.push({
+      position: out.length + 1,
+      chargeId: c.chargeId,
+      name: c.name,
+      kind: c.kind,
+      rateBp: c.kind === "percent" ? c.rateBp : 0,
+      baseMinor,
+      amountMinor,
+      amountLegalMinor: toLegal(amountMinor),
+      taxId: c.tax?.taxId ?? null,
+      taxRateBp,
+    })
+  }
+  return out
+}
+
+/** Las líneas y los recargos de una venta, como entradas del desglose de IVA. */
+export function taxEntries(
+  lines: readonly { lineTotalMinor: number; tax: LineTax | null }[],
+  charges: readonly { amountMinor: number; tax: LineTax | null }[],
+): { lineTotalMinor: number; tax: LineTax | null }[] {
+  return [...lines, ...charges.map((c) => ({ lineTotalMinor: c.amountMinor, tax: c.tax }))]
 }
 
 /**
@@ -446,6 +570,7 @@ function planCashMovement(draft: DocumentDraft, book: CurrencyBook): PostingPlan
     creditCurrency: null,
     creditLegalMinor: 0,
     allocations: [],
+    charges: [],
   }
 }
 
@@ -510,6 +635,7 @@ function planExpense(draft: DocumentDraft, book: CurrencyBook): PostingPlan {
     creditCurrency: credit.creditMinor > 0 ? credit.creditCurrency : null,
     creditLegalMinor: toLegal(credit.creditDocMinor),
     allocations: [],
+    charges: [],
   }
 }
 
@@ -583,6 +709,7 @@ function planTransfer(draft: DocumentDraft, book: CurrencyBook): PostingPlan {
     creditCurrency: null,
     creditLegalMinor: 0,
     allocations: [],
+    charges: [],
   }
 }
 
@@ -644,6 +771,7 @@ function planDisbursement(draft: DocumentDraft, book: CurrencyBook): PostingPlan
     creditCurrency: null,
     creditLegalMinor: 0,
     allocations: allocations.map((a) => ({ ...a })),
+    charges: [],
   }
 }
 
@@ -774,6 +902,155 @@ function planCollection(draft: DocumentDraft, book: CurrencyBook): PostingPlan {
     creditCurrency: null,
     creditLegalMinor: 0,
     allocations: allocations.map((a) => ({ ...a })),
+    charges: [],
+  }
+}
+
+/**
+ * Deuda manual: lo que un cliente debe (`DEBT_IN`) o lo que el negocio le debe a un proveedor
+ * (`DEBT_OUT`) sin una venta, compra o gasto detrás: un saldo de antes de usar el sistema o un
+ * préstamo. Todo el monto queda a crédito, en la moneda del documento. Si fue un préstamo, los pagos
+ * dicen de qué cuenta salió el dinero (`DEBT_IN`) o a cuál entró (`DEBT_OUT`) y suman el monto.
+ * No lleva productos ni IVA: no es una venta ni un gasto.
+ */
+function planDebt(draft: DocumentDraft, book: CurrencyBook): PostingPlan {
+  currencyOf(book, draft.currency)
+  if (draft.lines.length > 0) {
+    throw new PostingError("INVALID_LINE", "Una deuda no lleva productos")
+  }
+  if ((draft.allocations?.length ?? 0) > 0) {
+    throw new PostingError("INVALID_ALLOCATION", "Una deuda no se aplica a otra")
+  }
+  if ((draft.charges?.length ?? 0) > 0) {
+    throw new PostingError("INVALID_LINE", "Una deuda no lleva recargos")
+  }
+  const amountMinor = draft.amountMinor ?? 0
+  if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
+    throw new PostingError("INVALID_PAYMENT", "El monto de la deuda debe ser un entero positivo")
+  }
+  if (
+    (draft.creditMinor ?? 0) !== amountMinor ||
+    (draft.creditCurrency ?? draft.currency) !== draft.currency
+  ) {
+    throw new PostingError("INVALID_PAYMENT", "Toda la deuda queda a crédito, en su moneda")
+  }
+  for (const p of draft.payments) {
+    if (!Number.isSafeInteger(p.amountMinor) || p.amountMinor <= 0) {
+      throw new PostingError("INVALID_PAYMENT", "Cada monto prestado debe ser un entero positivo")
+    }
+    currencyOf(book, p.currency)
+  }
+  if (draft.payments.length > 0) {
+    const settlement = settle(draft.currency, amountMinor, draft.payments, book)
+    if (!settlement.settled) {
+      throw new PostingError(
+        "UNSETTLED",
+        `Lo prestado no es el monto de la deuda (diferencia ${settlement.difference.toFixed()} en unidades menores)`,
+      )
+    }
+  }
+  const toLegal = legalConverter(draft.currency, draft.legalCurrency, draft.rate, book)
+  // Prestarle a un cliente saca dinero; que un proveedor preste, lo mete.
+  const sign = draft.type === "DEBT_IN" ? -1 : 1
+  return {
+    lines: [],
+    totalMinor: amountMinor,
+    totalLegalMinor: toLegal(amountMinor),
+    taxes: [],
+    surcharges: [],
+    surchargeMinor: 0,
+    surchargeLegalMinor: 0,
+    stockMoves: [],
+    accountMoves: draft.payments.map((p) => ({
+      paymentId: p.id,
+      accountId: p.accountId,
+      currency: p.currency,
+      amountMinor: sign * p.amountMinor,
+    })),
+    discountMinor: 0,
+    discountLegalMinor: 0,
+    creditMinor: amountMinor,
+    creditCurrency: draft.currency,
+    creditLegalMinor: toLegal(amountMinor),
+    allocations: [],
+    charges: [],
+  }
+}
+
+/**
+ * Traslado de inventario (`STOCK_TRANSFER`): la mercancía sale de una ubicación y entra en otra
+ * en el mismo momento (de la tienda al depósito, de una tienda a otra). Cada línea lleva una
+ * cantidad positiva de un producto con existencia y genera dos movimientos: la resta en el origen
+ * y la suma en el destino. No lleva precio, impuestos, pagos ni deuda: el total es cero.
+ */
+function planStockTransfer(draft: DocumentDraft, book: CurrencyBook): PostingPlan {
+  currencyOf(book, draft.currency)
+  if (draft.payments.length > 0 || (draft.creditMinor ?? 0) > 0) {
+    throw new PostingError("INVALID_PAYMENT", "Un traslado no lleva pagos ni deuda")
+  }
+  if ((draft.allocations?.length ?? 0) > 0) {
+    throw new PostingError("INVALID_ALLOCATION", "Un traslado no se aplica a una deuda")
+  }
+  if ((draft.charges?.length ?? 0) > 0) {
+    throw new PostingError("INVALID_LINE", "Un traslado no lleva recargos")
+  }
+  if (draft.lines.length === 0) {
+    throw new PostingError("EMPTY_DOCUMENT", "Agrega los productos que se trasladan")
+  }
+  const to = draft.toLocationId
+  if (!to || to === draft.locationId) {
+    throw new PostingError("INVALID_LINE", "Elige una ubicación de destino distinta del origen")
+  }
+  const lines: PlannedLine[] = []
+  const stockMoves: PlannedStockMove[] = []
+  draft.lines.forEach((line, i) => {
+    const n = i + 1
+    if (!Number.isSafeInteger(line.qtyMilli) || line.qtyMilli <= 0) {
+      throw new PostingError("INVALID_LINE", `Línea ${n}: la cantidad debe ser positiva`)
+    }
+    if (line.unitPriceMinor !== 0 || (line.discountMinor ?? 0) !== 0) {
+      throw new PostingError("INVALID_LINE", `Línea ${n}: un traslado no lleva precio`)
+    }
+    if (!line.tracksStock) {
+      throw new PostingError("INVALID_LINE", `Línea ${n}: el producto no lleva existencia`)
+    }
+    lines.push({
+      lineNo: n,
+      variantId: line.variantId,
+      qtyMilli: line.qtyMilli,
+      unitPriceMinor: 0,
+      discountMinor: 0,
+      lineTotalMinor: 0,
+      taxId: null,
+      taxRateBp: 0,
+    })
+    stockMoves.push(
+      {
+        lineNo: n,
+        variantId: line.variantId,
+        locationId: draft.locationId,
+        qtyMilli: -line.qtyMilli,
+      },
+      { lineNo: n, variantId: line.variantId, locationId: to, qtyMilli: line.qtyMilli },
+    )
+  })
+  return {
+    lines,
+    totalMinor: 0,
+    totalLegalMinor: 0,
+    taxes: [],
+    surcharges: [],
+    surchargeMinor: 0,
+    surchargeLegalMinor: 0,
+    stockMoves,
+    accountMoves: [],
+    discountMinor: 0,
+    discountLegalMinor: 0,
+    creditMinor: 0,
+    creditCurrency: null,
+    creditLegalMinor: 0,
+    allocations: [],
+    charges: [],
   }
 }
 
@@ -790,7 +1067,9 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
   if (draft.type === "EXPENSE") return planExpense(draft, book)
   if (draft.type === "PAYMENT_OUT") return planDisbursement(draft, book)
   if (draft.type === "TRANSFER") return planTransfer(draft, book)
-  if ((draft.allocations?.length ?? 0) > 0 && draft.type !== "RETURN") {
+  if (draft.type === "DEBT_IN" || draft.type === "DEBT_OUT") return planDebt(draft, book)
+  if (draft.type === "STOCK_TRANSFER") return planStockTransfer(draft, book)
+  if ((draft.allocations?.length ?? 0) > 0 && !isReturn(draft.type)) {
     throw new PostingError(
       "INVALID_ALLOCATION",
       "Solo un abono o una devolución se aplican a la deuda",
@@ -798,6 +1077,9 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
   }
   if (draft.lines.length === 0) {
     throw new PostingError("EMPTY_DOCUMENT", "El documento no tiene líneas")
+  }
+  if ((draft.charges?.length ?? 0) > 0 && draft.type !== "SALE") {
+    throw new PostingError("INVALID_LINE", "Solo una venta lleva recargos (delivery, servicio…)")
   }
   currencyOf(book, draft.currency)
   const isAdjustment = draft.type === "ADJUSTMENT"
@@ -824,16 +1106,27 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
   // El total legal sale de convertir el ancla de cada alícuota (nunca de sumar líneas ya
   // convertidas): así no aparecen céntimos fantasma.
   const toLegal = legalConverter(draft.currency, draft.legalCurrency, draft.rate, book)
-  const taxes = isAdjustment
-    ? []
-    : computeTaxes(
-        draft.lines.map((line, i) => ({
-          lineTotalMinor: lines[i]?.lineTotalMinor ?? 0,
-          tax: line.tax,
-        })),
+  const lineEntries = draft.lines.map((line, i) => ({
+    lineTotalMinor: lines[i]?.lineTotalMinor ?? 0,
+    tax: line.tax,
+  }))
+  const lineTaxes = isAdjustment ? [] : computeTaxes(lineEntries, draft.pricesIncludeTax, toLegal)
+  // Los recargos (delivery, servicio) suman como líneas: entran al desglose con su propio IVA.
+  const charges = planCharges(draft.charges ?? [], lineTaxes, draft.pricesIncludeTax, toLegal)
+  const chargeTax = new Map((draft.charges ?? []).map((c) => [c.chargeId, c.tax]))
+  const taxes = charges.length
+    ? computeTaxes(
+        taxEntries(
+          lineEntries,
+          charges.map((c) => ({
+            amountMinor: c.amountMinor,
+            tax: chargeTax.get(c.chargeId) ?? null,
+          })),
+        ),
         draft.pricesIncludeTax,
         toLegal,
       )
+    : lineTaxes
   const totalMinor = taxes.reduce((acc, t) => acc + t.baseMinor + t.taxMinor, 0)
   const totalLegalMinor = taxes.reduce((acc, t) => acc + t.baseLegalMinor + t.taxLegalMinor, 0)
   if (!Number.isSafeInteger(totalMinor) || !Number.isSafeInteger(totalLegalMinor)) {
@@ -842,7 +1135,8 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
 
   const discountMinor = lines.reduce((acc, l) => acc + l.discountMinor, 0)
 
-  const stockSign = draft.type === "SALE" ? -1 : 1
+  // La mercancía sale al vender y al devolverle al proveedor; entra en lo demás.
+  const stockSign = draft.type === "SALE" || draft.type === "PURCHASE_RETURN" ? -1 : 1
   const stockMoves: PlannedStockMove[] = []
   draft.lines.forEach((line, i) => {
     if (line.tracksStock) {
@@ -875,6 +1169,7 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
       creditCurrency: null,
       creditLegalMinor: 0,
       allocations: [],
+      charges: [],
     }
   }
 
@@ -888,7 +1183,7 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
   const { creditMinor, creditCurrency, creditDocMinor } = creditOf(draft, totalMinor, book)
   // Una devolución puede descontarse de lo que el cliente debe: cuenta como un reembolso en la
   // moneda de la deuda (con la misma holgura de redondeo que cualquier monto en divisas).
-  const allocations = draft.type === "RETURN" ? (draft.allocations ?? []) : []
+  const allocations = isReturn(draft.type) ? (draft.allocations ?? []) : []
   const applied = allocations.reduce((acc, a) => acc + a.amountMinor, 0)
   if (allocations.length > 0) {
     checkAllocations(allocations)
@@ -943,7 +1238,8 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
     )
   }
 
-  const accountSign = draft.type === "SALE" ? 1 : -1
+  // El dinero entra al vender y cuando el proveedor devuelve lo de una compra; sale en lo demás.
+  const accountSign = draft.type === "SALE" || draft.type === "PURCHASE_RETURN" ? 1 : -1
   const accountMoves: PlannedAccountMove[] = draft.payments.map((p) => ({
     paymentId: p.id,
     accountId: p.accountId,
@@ -966,5 +1262,6 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
     creditCurrency: creditMinor > 0 ? creditCurrency : null,
     creditLegalMinor: toLegal(creditDocMinor),
     allocations: allocations.map((a) => ({ ...a })),
+    charges,
   }
 }

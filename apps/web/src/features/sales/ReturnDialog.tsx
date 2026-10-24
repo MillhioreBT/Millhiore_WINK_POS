@@ -16,6 +16,7 @@ import { toast } from "sonner"
 import { api, errorMessage } from "../../lib/api"
 import { formatMoney, formatQty, parseAmount, toInputQty } from "../../lib/format"
 import { bootstrapQuery, queryClient, rateStatusQuery } from "../../lib/queries"
+import { deviceTerminal } from "../../lib/terminal"
 import {
   computeCheckout,
   convertMinor,
@@ -50,6 +51,7 @@ function buildReturnTicket(picked: Pick[], pricesIncludeTax: boolean): Ticket {
   const taxes = computeTaxes(lines, pricesIncludeTax, identity)
   return {
     lineTotals: lines.map((l) => l.lineTotalMinor),
+    charges: [],
     discountMinor: lines.reduce((acc, l) => acc + l.discountMinor, 0),
     taxes,
     totalMinor: taxes.reduce((acc, t) => acc + t.baseMinor + t.taxMinor, 0),
@@ -57,19 +59,22 @@ function buildReturnTicket(picked: Pick[], pricesIncludeTax: boolean): Ticket {
   }
 }
 
-/** Devolver parte de una venta: qué productos, cuánto, y cómo se le devuelve el dinero al cliente. */
+/**
+ * Devolver parte de una venta (qué productos, cuánto y cómo se le devuelve el dinero al cliente) o
+ * de una compra al proveedor (y cómo reembolsa él).
+ */
 export function ReturnDialog({
-  saleId,
+  documentId,
   onClose,
   onPosted,
 }: {
-  saleId: string
+  documentId: string
   onClose: () => void
   onPosted: (documentId: string) => void
 }) {
   const info = useQuery({
-    queryKey: ["returnable", saleId],
-    queryFn: () => api<Returnable>(`/api/documents/${saleId}/returnable`),
+    queryKey: ["returnable", documentId],
+    queryFn: () => api<Returnable>(`/api/documents/${documentId}/returnable`),
     staleTime: 0,
   })
   const boot = useQuery(bootstrapQuery)
@@ -126,6 +131,7 @@ function ReturnBody({
     }
   }, [boot, rateValue, data.currency])
   const doc = data.currency
+  const toSupplier = data.kind === "PURCHASE"
   const [qty, setQty] = useState<Record<number, string>>({})
   const [payments, setPayments] = useState<PaymentEntry[]>([])
   const [useDebt, setUseDebt] = useState(true)
@@ -175,7 +181,7 @@ function ReturnBody({
       const posted = await api<PostedDocumentBody>(`/api/documents/${data.documentId}/return`, {
         body: {
           id: documentId,
-          terminalId: boot.terminals[0]?.id,
+          terminalId: deviceTerminal(boot)?.id,
           rate: ctx.rate,
           lines: picked.map(({ l, q }) => ({ lineNo: l.lineNo, qtyMilli: q })),
           creditAppliedMinor: applied,
@@ -190,9 +196,17 @@ function ReturnBody({
         },
       })
       await Promise.all(
-        ["documents", "document", "products", "receivables", "reports", "shifts", "returnable"].map(
-          (k) => queryClient.invalidateQueries({ queryKey: [k] }),
-        ),
+        [
+          "documents",
+          "document",
+          "products",
+          "receivables",
+          "payables",
+          "reports",
+          "shifts",
+          "returnable",
+          "lots",
+        ].map((k) => queryClient.invalidateQueries({ queryKey: [k] })),
       )
       toast.success(`Devolución ${posted.number} registrada`)
       onPosted(posted.id)
@@ -209,16 +223,21 @@ function ReturnBody({
     <Dialog open onOpenChange={(o) => !o && !busy && onClose()}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Devolución de la venta {data.number}</DialogTitle>
+          <DialogTitle>
+            {toSupplier
+              ? `Devolución al proveedor de la compra ${data.number}`
+              : `Devolución de la venta ${data.number}`}
+          </DialogTitle>
           <DialogDescription>
-            Elige qué productos devuelve{data.contactName ? ` ${data.contactName}` : " el cliente"}.
-            Se devuelven con el precio, el descuento y el IVA con que se vendieron.
+            {toSupplier
+              ? `Elige qué productos se le devuelven ${data.contactName ? `a ${data.contactName}` : "al proveedor"}. Salen del inventario con el costo y el IVA con que se compraron.`
+              : `Elige qué productos devuelve ${data.contactName ?? "el cliente"}. Se devuelven con el precio, el descuento y el IVA con que se vendieron.`}
           </DialogDescription>
         </DialogHeader>
 
         {everything ? (
           <p className="rounded-lg bg-muted/60 p-4 text-center text-muted-foreground text-sm">
-            Ya se devolvió todo lo de esta venta.
+            Ya se devolvió todo lo de esta {toSupplier ? "compra" : "venta"}.
           </p>
         ) : (
           <ul className="divide-y rounded-lg border text-sm">
@@ -255,7 +274,8 @@ function ReturnBody({
                   </Button>
                 </span>
                 <span className="text-muted-foreground text-xs">
-                  Vendido {formatQty(l.qtyMilli)} × {formatMoney(l.unitPriceMinor, doc)}
+                  {toSupplier ? "Comprado" : "Vendido"} {formatQty(l.qtyMilli)} ×{" "}
+                  {formatMoney(l.unitPriceMinor, doc)}
                   {l.discountMinor ? ` (desc. ${formatMoney(l.discountMinor, doc)})` : ""}
                   {l.returnedMilli ? ` · ya devuelto ${formatQty(l.returnedMilli)}` : ""}
                 </span>
@@ -280,7 +300,11 @@ function ReturnBody({
               </div>
               {credit ? (
                 <div className="flex justify-between text-muted-foreground">
-                  <span>Se descuenta de lo que debe</span>
+                  <span>
+                    {toSupplier
+                      ? "Se descuenta de lo que se le debe"
+                      : "Se descuenta de lo que debe"}
+                  </span>
                   <span className="tabular">
                     {formatMoney(credit.amountMinor, credit.currency)}
                   </span>
@@ -299,18 +323,23 @@ function ReturnBody({
                   }}
                 />
                 <span>
-                  El cliente todavía debe {formatMoney(debt.outstandingMinor, debt.currency)} de
-                  esta venta: descontar la devolución de esa deuda
+                  {toSupplier
+                    ? `Todavía se le deben ${formatMoney(debt.outstandingMinor, debt.currency)} al proveedor por esta compra: descontar la devolución de esa deuda`
+                    : `El cliente todavía debe ${formatMoney(debt.outstandingMinor, debt.currency)} de esta venta: descontar la devolución de esa deuda`}
                 </span>
               </label>
             ) : null}
             {checkout.settled && credit && payments.length === 0 ? (
               <p className="text-muted-foreground text-sm">
-                No hay que devolver dinero: todo se descuenta de la deuda.
+                {toSupplier
+                  ? "El proveedor no tiene que reembolsar: todo se descuenta de la deuda."
+                  : "No hay que devolver dinero: todo se descuenta de la deuda."}
               </p>
             ) : (
               <>
-                <p className="font-medium text-sm">¿Cómo se le devuelve el dinero?</p>
+                <p className="font-medium text-sm">
+                  {toSupplier ? "¿Cómo reembolsa el proveedor?" : "¿Cómo se le devuelve el dinero?"}
+                </p>
                 <PaymentPanel
                   ctx={ctx}
                   ticket={ticket}

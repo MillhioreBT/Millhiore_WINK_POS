@@ -23,7 +23,7 @@ import { HttpError } from "../../http/errors"
 import type { PostContext } from "../../posting/post"
 import { normalizeTaxId } from "../contacts/service"
 
-export function readSetting<T>(db: Db, key: string): T | undefined {
+export function readSetting<T>(db: Pick<Db, "select">, key: string): T | undefined {
   const row = db.select().from(setting).where(eq(setting.key, key)).get()
   return row ? (row.value as T) : undefined
 }
@@ -42,17 +42,17 @@ export function writeSetting(db: Writer, key: string, value: unknown): void {
  * Permitir vender aunque las existencias registradas no alcancen. Por defecto sí: en una bodega
  * el inventario casi nunca está perfecto y bloquear la venta en caja es peor que un saldo negativo.
  */
-export function allowNegativeStock(db: Db): boolean {
+export function allowNegativeStock(db: Pick<Db, "select">): boolean {
   return readSetting<boolean>(db, "inventory.allowNegativeStock") ?? true
 }
 
 /** Vender exige abrir turno (con su conteo de efectivo). Por defecto sí. */
-export function requireShift(db: Db): boolean {
+export function requireShift(db: Pick<Db, "select">): boolean {
   return readSetting<boolean>(db, "cash.requireShift") ?? true
 }
 
 /** Permitir vender a crédito (fiado) a clientes registrados. Por defecto sí. */
-export function creditEnabled(db: Db): boolean {
+export function creditEnabled(db: Pick<Db, "select">): boolean {
   return readSetting<boolean>(db, "credit.enabled") ?? true
 }
 
@@ -103,7 +103,11 @@ export function updateCreditSettings(
 }
 
 /** Reglas vigentes con las que contabiliza una persona ahora mismo. */
-export function postingContext(db: Db, now: number, actorId: string | null): PostContext {
+export function postingContext(
+  db: Pick<Db, "select">,
+  now: number,
+  actorId: string | null,
+): PostContext {
   return {
     now,
     actorId,
@@ -132,7 +136,7 @@ const FISCAL_KEYS = {
   defaultTaxId: "fiscal.defaultTaxId",
 } as const
 
-export function fiscalSettings(db: Db): FiscalSettings {
+export function fiscalSettings(db: Pick<Db, "select">): FiscalSettings {
   const taxpayer = readSetting<string>(db, FISCAL_KEYS.taxpayer)
   return {
     taxpayer: (TAXPAYER_TYPES as readonly string[]).includes(taxpayer ?? "")

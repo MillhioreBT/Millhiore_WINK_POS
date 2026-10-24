@@ -3,6 +3,7 @@ import {
   accountSchema,
   apiErrorSchema,
   createAccountSchema,
+  exchangeExposureSchema,
   postedDocumentSchema,
   transferBodySchema,
   transferRowSchema,
@@ -13,6 +14,7 @@ import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
 import { postingContext } from "../settings/service"
+import { exchangeExposure } from "./exposure"
 import { createAccount, listAccounts, listTransfers, postTransfer, updateAccount } from "./service"
 
 const err = { content: { "application/json": { schema: apiErrorSchema } } }
@@ -20,6 +22,20 @@ const json = <T extends z.ZodType>(schema: T) => ({ "application/json": { schema
 
 /** Ver las cuentas: quien las administra o mira las finanzas y los informes. */
 const VIEWERS: readonly Permission[] = ["finance.manage", "finance.view", "report.view"]
+
+const exposureRoute = createRoute({
+  method: "get",
+  path: "/api/accounts/exposure",
+  tags: ["Cuentas"],
+  summary: "Exposición cambiaria de los saldos en bolívares",
+  description:
+    "Cuánto valían en la moneda de referencia los bolívares de cada cuenta cuando entraron (promedio móvil a la tasa de cada día) contra lo que valen hoy. Informativa: no toca los saldos.",
+  responses: {
+    200: { description: "Exposición por cuenta", content: json(exchangeExposureSchema) },
+    403: { description: "Falta finance.manage", ...err },
+    409: { description: "El negocio aún no está configurado", ...err },
+  },
+})
 
 const listRoute = createRoute({
   method: "get",
@@ -110,6 +126,11 @@ export function registerAccountRoutes(app: App, deps: AppDeps): void {
       throw new HttpError(403, "FORBIDDEN", "Falta el permiso finance.manage")
     }
   }
+
+  app.openapi(exposureRoute, (c) => {
+    checkView(actorOf(c).permissions)
+    return c.json(exchangeExposure(deps.db, deps.now()), 200)
+  })
 
   app.openapi(listRoute, (c) => {
     checkView(actorOf(c).permissions)

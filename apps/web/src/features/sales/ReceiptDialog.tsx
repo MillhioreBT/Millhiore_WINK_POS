@@ -10,7 +10,14 @@ import {
 import { useQuery } from "@tanstack/react-query"
 import { PrinterIcon } from "lucide-react"
 import { useEffect, useRef } from "react"
-import { formatDateTime, formatMoney, formatPercent, formatQty, formatRate } from "../../lib/format"
+import {
+  formatDate,
+  formatDateTime,
+  formatMoney,
+  formatPercent,
+  formatQty,
+  formatRate,
+} from "../../lib/format"
 import { openDrawer, usePrintDocument } from "../../lib/printing"
 import { bootstrapQuery, documentQuery } from "../../lib/queries"
 
@@ -25,6 +32,10 @@ const TITLE: Record<string, string> = {
   CASH_IN: "INGRESO DE CAJA",
   CASH_OUT: "RETIRO DE CAJA",
   ADJUSTMENT: "AJUSTE DE INVENTARIO",
+  DEBT_IN: "CUENTA POR COBRAR · NO FISCAL",
+  DEBT_OUT: "CUENTA POR PAGAR",
+  STOCK_TRANSFER: "TRASLADO DE INVENTARIO",
+  PURCHASE_RETURN: "DEVOLUCIÓN A PROVEEDOR",
 }
 
 /** Origen y destino de una transferencia; en su anulación el dinero va al revés. */
@@ -52,6 +63,64 @@ export function BusinessHeader({ business }: { business: BusinessInfo | undefine
   )
 }
 
+/** Los lotes que movió una línea: código, vencimiento y cantidad. */
+function LotLines({ lots }: { lots: DocumentDetail["lines"][number]["lots"] }) {
+  return lots.map((x) => (
+    <p key={x.lotId} className="flex justify-between gap-2 pl-2">
+      <span>
+        {x.code ? `Lote ${x.code}` : "Lote"}
+        {x.expiresOn ? ` · vence ${formatDate(x.expiresOn)}` : " · sin fecha"}
+      </span>
+      <span>{formatQty(x.qtyMilli)}</span>
+    </p>
+  ))
+}
+
+/** Comprobante de un traslado: de dónde a dónde y cuánto de cada producto, sin precios. */
+function TransferReceipt({
+  doc,
+  business,
+}: {
+  doc: DocumentDetail
+  business: BusinessInfo | undefined
+}) {
+  // El reverso devuelve la mercancía: va del destino al origen.
+  const reversed = doc.reversesDocumentId !== null
+  const units = doc.lines.reduce((acc, l) => acc + Math.abs(l.qtyMilli), 0)
+  return (
+    <div id="receipt" className="mx-auto w-full max-w-[320px] font-mono text-[12px] leading-snug">
+      <div className="text-center">
+        <BusinessHeader business={business} />
+        <p className="mt-1">{TITLE[doc.type]}</p>
+        <p>
+          {doc.number} · {formatDateTime(doc.postedAt)}
+        </p>
+        {doc.createdBy ? <p>Atendió: {doc.createdBy}</p> : null}
+        <p>De: {reversed ? doc.toLocationName : doc.locationName}</p>
+        <p>A: {reversed ? doc.locationName : doc.toLocationName}</p>
+        {doc.note ? <p>{doc.note}</p> : null}
+        {doc.reversesDocumentId ? <p className="font-bold">ANULACIÓN</p> : null}
+        {doc.reversedBy ? <p className="font-bold">*** ANULADO ***</p> : null}
+      </div>
+      <hr className="my-2 border-dashed border-current" />
+      {doc.lines.map((l) => (
+        <div key={l.lineNo}>
+          <p className="flex justify-between gap-2">
+            <span>{l.name}</span>
+            <span>{formatQty(Math.abs(l.qtyMilli))}</span>
+          </p>
+          <LotLines lots={l.lots} />
+        </div>
+      ))}
+      <hr className="my-2 border-dashed border-current" />
+      <p className="flex justify-between font-bold">
+        <span>UNIDADES</span>
+        <span>{formatQty(units)}</span>
+      </p>
+    </div>
+  )
+}
+
 /** Recibo de una venta, listo para imprimir en papel térmico de 80 mm. No es una factura fiscal. */
 export function Receipt({
   doc,
@@ -60,6 +129,7 @@ export function Receipt({
   doc: DocumentDetail
   business: BusinessInfo | undefined
 }) {
+  if (doc.type === "STOCK_TRANSFER") return <TransferReceipt doc={doc} business={business} />
   const cur = doc.currency
   // Las líneas exentas o exoneradas se marcan (E), como en la factura venezolana.
   const taxCode = (taxId: string | null, rateBp: number) => (taxId && rateBp === 0 ? " (E)" : "")
@@ -82,7 +152,10 @@ export function Receipt({
         {doc.createdBy ? <p>Atendió: {doc.createdBy}</p> : null}
         {doc.contactName ? (
           <p>
-            {doc.type === "PURCHASE" || doc.type === "EXPENSE" || doc.type === "PAYMENT_OUT"
+            {doc.type === "PURCHASE" ||
+            doc.type === "PURCHASE_RETURN" ||
+            doc.type === "EXPENSE" ||
+            doc.type === "PAYMENT_OUT"
               ? "Proveedor"
               : "Cliente"}
             : {doc.contactName}
@@ -91,9 +164,15 @@ export function Receipt({
         ) : null}
         {doc.expenseCategoryName ? <p>Categoría: {doc.expenseCategoryName}</p> : null}
         {doc.stockReasonName ? <p>Motivo: {doc.stockReasonName}</p> : null}
+        {doc.discountCode ? <p>Código de descuento: {doc.discountCode}</p> : null}
         {doc.externalRef ? <p>Factura: {doc.externalRef}</p> : null}
         {doc.note ? <p>{doc.note}</p> : null}
-        {doc.returnsNumber ? <p>Devolución de la venta {doc.returnsNumber}</p> : null}
+        {doc.returnsNumber ? (
+          <p>
+            Devolución de la {doc.type === "PURCHASE_RETURN" ? "compra" : "venta"}{" "}
+            {doc.returnsNumber}
+          </p>
+        ) : null}
         {doc.reversesDocumentId ? <p className="font-bold">ANULACIÓN</p> : null}
         {doc.reversedBy ? <p className="font-bold">*** ANULADA ***</p> : null}
       </div>
@@ -103,9 +182,11 @@ export function Receipt({
           <p>
             {doc.type === "RETURN"
               ? "Descontado de lo que debe:"
-              : doc.type === "PAYMENT_OUT"
-                ? "Pago de:"
-                : "Abono a:"}
+              : doc.type === "PURCHASE_RETURN"
+                ? "Descontado de lo que se le debe:"
+                : doc.type === "PAYMENT_OUT"
+                  ? "Pago de:"
+                  : "Abono a:"}
           </p>
           {doc.allocations.map((a) => (
             <p key={a.saleDocumentId} className="flex justify-between">
@@ -134,12 +215,27 @@ export function Receipt({
               <span>-{formatMoney(l.discountMinor, cur)}</span>
             </p>
           ) : null}
+          {doc.type === "PURCHASE" || doc.type === "ADJUSTMENT" ? <LotLines lots={l.lots} /> : null}
         </div>
       ))}
+      {/* Recargos de la venta (delivery, servicio), después de los productos. */}
+      {doc.charges.map((c) => (
+        <p key={c.chargeId} className="flex justify-between">
+          <span>
+            {c.name}
+            {c.kind === "percent" ? ` ${formatPercent(c.rateBp)}` : ""}
+            {taxCode(c.taxId, c.taxRateBp)}
+          </span>
+          <span>{formatMoney(c.amountMinor, cur)}</span>
+        </p>
+      ))}
       <hr className="my-2 border-dashed border-current" />
-      {/* Sin impuesto asignado (negocio que no cobra IVA) no hay desglose que mostrar. */}
+      {/* Sin impuesto asignado (negocio que no cobra IVA) no hay desglose que mostrar; si cobra
+      IVA, lo que no lo lleva (un recargo de servicio) sale como no sujeto. */}
       {doc.taxes
-        .filter((t) => t.taxId !== null)
+        .filter(
+          (t) => doc.taxes.some((x) => x.taxId !== null) && (t.taxId !== null || t.baseMinor !== 0),
+        )
         .map((t) =>
           t.rateBp > 0 ? (
             <div key={`${t.taxId}-${t.rateBp}`}>
@@ -154,7 +250,10 @@ export function Receipt({
             </div>
           ) : (
             <p key={`${t.taxId}-${t.kind}`} className="flex justify-between">
-              <span>{KIND_LABEL[t.kind] ?? "Exento"} (E)</span>
+              <span>
+                {KIND_LABEL[t.kind] ?? "Exento"}
+                {t.kind === "not_subject" ? "" : " (E)"}
+              </span>
               <span>{formatMoney(t.baseMinor, cur)}</span>
             </p>
           ),
@@ -198,13 +297,16 @@ export function Receipt({
               ? `${transferLeg(i, doc.reversesDocumentId !== null)} ${p.methodName}`
               : doc.type === "RETURN"
                 ? "Reembolso"
-                : doc.type === "EXPENSE" || doc.type === "PAYMENT_OUT"
-                  ? "Pagado"
-                  : p.amountMinor < 0
-                    ? "Vuelto"
-                    : p.methodName}
+                : doc.type === "PURCHASE_RETURN"
+                  ? "Reembolso del proveedor"
+                  : doc.type === "EXPENSE" || doc.type === "PAYMENT_OUT"
+                    ? "Pagado"
+                    : p.amountMinor < 0
+                      ? "Vuelto"
+                      : p.methodName}
             {doc.type !== "TRANSFER" &&
             (doc.type === "RETURN" ||
+              doc.type === "PURCHASE_RETURN" ||
               doc.type === "EXPENSE" ||
               doc.type === "PAYMENT_OUT" ||
               p.amountMinor < 0)

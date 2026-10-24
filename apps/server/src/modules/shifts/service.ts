@@ -1,7 +1,7 @@
 import type { CloseShiftBody, OpenShiftBody, Shift, ShiftReport } from "@millhiore/contracts"
 import {
   account,
-  accountBalance,
+  accountMove,
   auditLog,
   business,
   cashShift,
@@ -16,7 +16,7 @@ import {
   user,
 } from "@millhiore/db"
 import { exchangeRate, isUuidv7, uuidv7 } from "@millhiore/domain"
-import { and, asc, desc, eq, inArray } from "drizzle-orm"
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm"
 import { alias } from "drizzle-orm/sqlite-core"
 import { HttpError } from "../../http/errors"
 import { type PostContext, postDocumentIn } from "../../posting/post"
@@ -35,12 +35,18 @@ function cashAccounts(db: Reader) {
     .all()
 }
 
-function balanceOf(db: Reader, accountId: string): number {
+/**
+ * Lo que debe haber en la gaveta de una caja para una cuenta de efectivo: lo que movieron los
+ * documentos de esa caja. Con varias cajas, cada una lleva su parte de la misma cuenta («Efectivo
+ * Bs») y su propio turno; con una sola, es el saldo de la cuenta.
+ */
+function drawerBalance(db: Reader, terminalId: string, accountId: string): number {
   return (
     db
-      .select({ amount: accountBalance.amountMinor })
-      .from(accountBalance)
-      .where(eq(accountBalance.accountId, accountId))
+      .select({ amount: sql<number>`coalesce(sum(${accountMove.amountMinor}), 0)` })
+      .from(accountMove)
+      .innerJoin(document, eq(document.id, accountMove.documentId))
+      .where(and(eq(accountMove.accountId, accountId), eq(document.terminalId, terminalId)))
       .get()?.amount ?? 0
   )
 }
@@ -175,13 +181,14 @@ export function openShift(db: Db, input: OpenShiftBody, ctx: PostContext): Shift
         })
         .run()
       for (const a of accounts) {
-        const expected = balanceOf(tx, a.id)
+        const expected = drawerBalance(tx, term.id, a.id)
         const counted = counts.get(a.id)?.countedMinor ?? 0
         // La primera vez que se cuenta una gaveta, lo que hay es el fondo inicial, no un sobrante.
         const firstCount = !tx
           .select({ id: cashShiftAccount.shiftId })
           .from(cashShiftAccount)
-          .where(eq(cashShiftAccount.accountId, a.id))
+          .innerJoin(cashShift, eq(cashShift.id, cashShiftAccount.shiftId))
+          .where(and(eq(cashShiftAccount.accountId, a.id), eq(cashShift.terminalId, term.id)))
           .get()
         const adjustment =
           counted === expected
@@ -214,8 +221,8 @@ export function openShift(db: Db, input: OpenShiftBody, ctx: PostContext): Shift
 }
 
 /**
- * Cierra el turno con el arqueo de cada cuenta de efectivo. Lo esperado es el saldo de la cuenta
- * en los libros; la diferencia (sobrante o faltante) se asienta como ingreso o retiro, de modo
+ * Cierra el turno con el arqueo de cada cuenta de efectivo. Lo esperado es lo que la caja tiene de
+ * esa cuenta en los libros; la diferencia (sobrante o faltante) se asienta como ingreso o retiro, de modo
  * que el turno siguiente arranca con los libros cuadrados con la gaveta.
  */
 export function closeShift(
@@ -247,7 +254,7 @@ export function closeShift(
       const differences: { account: string; currency: string; diff: number }[] = []
       for (const r of rows) {
         const count = counts.get(r.accountId)
-        const expected = balanceOf(tx, r.accountId)
+        const expected = drawerBalance(tx, shift.terminalId, r.accountId)
         const counted = count?.countedMinor ?? 0
         const diff = counted - expected
         const adjustment =
@@ -371,6 +378,8 @@ export function shiftReport(db: Db, shiftId: string): ShiftReport {
   const expenses = docs.filter((d) => d.type === "EXPENSE")
   // Los pagos a proveedores también salen de la gaveta (o de las cuentas) en el turno.
   const supplierPayments = docs.filter((d) => d.type === "PAYMENT_OUT")
+  // Lo devuelto a los proveedores: lo que reembolsan puede entrar a la gaveta.
+  const supplierReturns = docs.filter((d) => d.type === "PURCHASE_RETURN")
   // Las devoluciones restan de las ventas: su importe y el dinero que sale entran con signo contrario.
   const returns = docs.filter((d) => d.type === "RETURN")
   const returnIds = new Set(returns.map((d) => d.id))
@@ -468,6 +477,10 @@ export function shiftReport(db: Db, shiftId: string): ShiftReport {
     supplierPayments: {
       count: supplierPayments.reduce((acc, d) => acc + (d.reversesDocumentId ? -1 : 1), 0),
       totalLegalMinor: supplierPayments.reduce((acc, d) => acc + d.totalLegalMinor, 0),
+    },
+    supplierReturns: {
+      count: supplierReturns.reduce((acc, d) => acc + (d.reversesDocumentId ? -1 : 1), 0),
+      totalLegalMinor: supplierReturns.reduce((acc, d) => acc + d.totalLegalMinor, 0),
     },
     byMethod: [...byMethod.values()]
       .filter((m) => m.amountMinor !== 0)

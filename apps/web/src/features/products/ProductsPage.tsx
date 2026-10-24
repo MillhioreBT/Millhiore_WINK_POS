@@ -5,6 +5,10 @@ import {
   Card,
   Input,
   NativeSelect,
+  Popover,
+  PopoverClose,
+  PopoverContent,
+  PopoverTrigger,
   Table,
   TableBody,
   TableCell,
@@ -13,13 +17,32 @@ import {
   TableRow,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
-import { BoxesIcon, PencilIcon, PlusIcon, SearchIcon, TagsIcon } from "lucide-react"
+import { Link } from "@tanstack/react-router"
+import {
+  BoxesIcon,
+  EllipsisIcon,
+  ListIcon,
+  PencilIcon,
+  PercentIcon,
+  PlusIcon,
+  SearchIcon,
+  TagsIcon,
+  TicketPercentIcon,
+  UploadIcon,
+} from "lucide-react"
 import { useMemo, useState } from "react"
-import { formatMoney, formatPercent, formatQty } from "../../lib/format"
+import { ScanButton } from "../../components/CameraScanner"
+import { ImportDialog } from "../../components/ImportDialog"
+import { formatDate, formatMoney, formatPercent, formatQty } from "../../lib/format"
+import { productImport } from "../../lib/importConfigs"
+import { stockAt, useLocations } from "../../lib/locations"
 import { bootstrapQuery, categoriesQuery, productsQuery, rateStatusQuery } from "../../lib/queries"
-import { can, useMe } from "../../lib/session"
+import { can, useFeatures, useMe } from "../../lib/session"
 import { convertMinor, makeContext } from "../pos/compute"
+import { BulkPriceDialog } from "./BulkPriceDialog"
 import { CategoriesDialog } from "./CategoriesDialog"
+import { DiscountCodesDialog } from "./DiscountCodesDialog"
+import { PriceListsDialog } from "./PriceListsDialog"
 import { ProductDialog } from "./ProductDialog"
 import { StockDialog } from "./StockDialog"
 
@@ -34,9 +57,15 @@ export function ProductsPage() {
   const [adjusting, setAdjusting] = useState<CatalogItem | null>(null)
   const [categoryFilter, setCategoryFilter] = useState("")
   const [managingCategories, setManagingCategories] = useState(false)
+  const [repricing, setRepricing] = useState(false)
+  const [managingLists, setManagingLists] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [managingCodes, setManagingCodes] = useState(false)
   const categories = useQuery(categoriesQuery({ all: true }))
   const categoryName = (id: string | null) => categories.data?.find((c) => c.id === id)?.name
   const canManage = can(me, "catalog.manage")
+  const features = useFeatures()
+  const locations = useLocations()
   const canAdjust = can(me, "inventory.adjust")
 
   const ctx = useMemo(
@@ -67,8 +96,13 @@ export function ProductsPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Buscar por nombre o código"
-            className="pl-9"
+            className="pr-11 pl-9"
             aria-label="Buscar productos"
+          />
+          <ScanButton
+            className="absolute top-1/2 right-0.5 size-9 -translate-y-1/2 border-0 shadow-none"
+            label="Buscar con la cámara"
+            onCode={setSearch}
           />
         </div>
         <NativeSelect
@@ -87,9 +121,6 @@ export function ProductsPage() {
             ))}
           <option value="none">Sin categoría</option>
         </NativeSelect>
-        <Button variant="outline" onClick={() => setManagingCategories(true)}>
-          <TagsIcon /> Categorías
-        </Button>
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -99,6 +130,69 @@ export function ProductsPage() {
           />
           Ver inactivos
         </label>
+        {/* Lo que se usa de vez en cuando va en un menú, para que la barra quepa en una fila. */}
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="outline" aria-label="Más opciones" title="Más opciones">
+              <EllipsisIcon /> Más
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="grid w-60 gap-1 p-1.5">
+            <PopoverClose asChild>
+              <Button
+                variant="ghost"
+                className="justify-start"
+                onClick={() => setManagingCategories(true)}
+              >
+                <TagsIcon /> Categorías
+              </Button>
+            </PopoverClose>
+            {canManage ? (
+              <>
+                <PopoverClose asChild>
+                  <Button
+                    variant="ghost"
+                    className="justify-start"
+                    onClick={() => setRepricing(true)}
+                  >
+                    <PercentIcon /> Cambiar precios
+                  </Button>
+                </PopoverClose>
+                {features.priceLists ? (
+                  <PopoverClose asChild>
+                    <Button
+                      variant="ghost"
+                      className="justify-start"
+                      onClick={() => setManagingLists(true)}
+                    >
+                      <ListIcon /> Listas de precios
+                    </Button>
+                  </PopoverClose>
+                ) : null}
+                {can(me, "sale.discount") ? (
+                  <PopoverClose asChild>
+                    <Button
+                      variant="ghost"
+                      className="justify-start"
+                      onClick={() => setManagingCodes(true)}
+                    >
+                      <TicketPercentIcon /> Códigos de descuento
+                    </Button>
+                  </PopoverClose>
+                ) : null}
+                <PopoverClose asChild>
+                  <Button
+                    variant="ghost"
+                    className="justify-start"
+                    onClick={() => setImporting(true)}
+                  >
+                    <UploadIcon /> Importar desde Excel
+                  </Button>
+                </PopoverClose>
+              </>
+            ) : null}
+          </PopoverContent>
+        </Popover>
         {canManage ? (
           <Button onClick={() => setEditing(null)}>
             <PlusIcon /> Nuevo producto
@@ -189,6 +283,15 @@ export function ProductsPage() {
                         {formatQty(p.stockMilli)}
                       </span>
                     )}
+                    {p.expiry && features.lots ? <ExpiryNote expiry={p.expiry} /> : null}
+                    {locations && p.tracksStock ? (
+                      <span className="block whitespace-normal text-muted-foreground text-xs">
+                        {locations
+                          .filter((l) => stockAt(p, l.id) !== 0)
+                          .map((l) => `${l.name} ${formatQty(stockAt(p, l.id))}`)
+                          .join(" · ")}
+                      </span>
+                    ) : null}
                   </TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-0.5 sm:gap-1">
@@ -234,9 +337,42 @@ export function ProductsPage() {
         />
       ) : null}
       {adjusting ? <StockDialog item={adjusting} onClose={() => setAdjusting(null)} /> : null}
+      {repricing ? (
+        <BulkPriceDialog
+          filteredIds={
+            search.trim() || categoryFilter || showInactive ? rows.map((r) => r.variantId) : null
+          }
+          canUseCost={can(me, "cost.view")}
+          onClose={() => setRepricing(false)}
+        />
+      ) : null}
+      {importing ? (
+        <ImportDialog config={productImport} onClose={() => setImporting(false)} />
+      ) : null}
+      {managingCodes ? <DiscountCodesDialog onClose={() => setManagingCodes(false)} /> : null}
+      {managingLists ? (
+        <PriceListsDialog canManage={canManage} onClose={() => setManagingLists(false)} />
+      ) : null}
       {managingCategories ? (
         <CategoriesDialog canManage={canManage} onClose={() => setManagingCategories(false)} />
       ) : null}
     </div>
+  )
+}
+
+/** Bajo la existencia de un producto con lotes: lo vencido o el próximo vencimiento. */
+function ExpiryNote({ expiry }: { expiry: NonNullable<CatalogItem["expiry"]> }) {
+  const expired = Object.values(expiry.expiredByLocation).reduce((acc, q) => acc + q, 0)
+  return (
+    <Link
+      to="/vencimientos"
+      className={`block text-xs underline-offset-4 hover:underline ${expired ? "text-destructive" : "text-muted-foreground"}`}
+    >
+      {expired
+        ? `${formatQty(expired)} vencido${expired === 1000 ? "" : "s"}`
+        : expiry.nextExpiresOn
+          ? `vence ${formatDate(expiry.nextExpiresOn)}`
+          : "sin fecha"}
+    </Link>
   )
 }

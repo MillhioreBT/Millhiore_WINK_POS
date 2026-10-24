@@ -5,6 +5,7 @@ import {
   CardHeader,
   CardTitle,
   Input,
+  NativeSelect,
   Table,
   TableBody,
   TableCell,
@@ -16,13 +17,17 @@ import { useQuery } from "@tanstack/react-query"
 import { SearchIcon } from "lucide-react"
 import { useState } from "react"
 import { formatMoney, formatQty } from "../../lib/format"
+import { useLocations } from "../../lib/locations"
 import { inventoryReportQuery } from "../../lib/queries"
 import { bold, downloadXlsx, fileName, moneyCell, qtyCell } from "../../lib/xlsx"
 import { ExportButtons, PrintHeader } from "./parts"
 
 /** Lo que hay en el inventario hoy, a costo y a precio de venta. No depende del período. */
 export function InventoryTab({ business, today }: { business: string; today: string }) {
-  const { data: r, isLoading } = useQuery(inventoryReportQuery)
+  const locations = useLocations()
+  const [locationId, setLocationId] = useState("")
+  const { data: r, isLoading } = useQuery(inventoryReportQuery(locationId))
+  const where = locations?.find((l) => l.id === locationId)?.name
   const [search, setSearch] = useState("")
   const [lowOnly, setLowOnly] = useState(false)
   if (!r) {
@@ -45,7 +50,7 @@ export function InventoryTab({ business, today }: { business: string; today: str
         name: "Inventario",
         widths: [36, 14, 20, 12, 10, 14, 14, 18, 18],
         rows: [
-          [bold(`${business} · Inventario valorado al ${today}`)],
+          [bold(`${business} · Inventario valorado al ${today}${where ? ` · ${where}` : ""}`)],
           [`Valores en ${c}${r.rate ? ` a la tasa ${Number(r.rate)}` : ""}`],
           [],
           [
@@ -98,6 +103,21 @@ export function InventoryTab({ business, today }: { business: string; today: str
             className="pl-9"
           />
         </div>
+        {locations ? (
+          <NativeSelect
+            aria-label="Ubicación"
+            value={locationId}
+            onChange={(e) => setLocationId(e.target.value)}
+            className="w-full sm:w-48 print:hidden"
+          >
+            <option value="">Todas las ubicaciones</option>
+            {locations.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name}
+              </option>
+            ))}
+          </NativeSelect>
+        ) : null}
         <label className="flex items-center gap-2 text-sm print:hidden">
           <input
             type="checkbox"
@@ -111,7 +131,11 @@ export function InventoryTab({ business, today }: { business: string; today: str
           <ExportButtons onExcel={exportXlsx} />
         </div>
       </div>
-      <PrintHeader business={business} title="Inventario valorado" period={`al ${today}`} />
+      <PrintHeader
+        business={business}
+        title={where ? `Inventario valorado · ${where}` : "Inventario valorado"}
+        period={`al ${today}`}
+      />
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Card>

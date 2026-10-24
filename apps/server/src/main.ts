@@ -54,6 +54,13 @@ for (const address of lanAddresses()) {
 if (!config.webRoot) {
   console.info("[web] sin la aplicación compilada: solo API (compila con `bun run build`)")
 }
+// Antes de 1.4.4, Bun tiene fallos de seguridad (descompresión Brotli al traer la tasa, certificados
+// raíz comprometidos): se avisa, sin impedir que el negocio abra.
+if (Bun.semver.order(Bun.version, "1.4.4") < 0) {
+  console.warn(
+    `[seguridad] Bun ${Bun.version} tiene fallos corregidos en 1.4.4: ejecuta \`bun upgrade\``,
+  )
+}
 
 /** IPv4 privadas de la PC (192.168.x.x, 10.x.x.x, 172.16–31.x.x): por donde entran celulares y tablets. */
 function lanAddresses(): string[] {

@@ -1,12 +1,17 @@
 import { Button, Field, Input, Tabs, TabsContent, TabsList, TabsTrigger } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
+import { MessageCircleIcon } from "lucide-react"
 import { useState } from "react"
 import { dayRange, daysBefore, todayInCaracas } from "../../lib/days"
 import { bootstrapQuery } from "../../lib/queries"
+import { previousRange } from "./compare"
 import { FinanceTab } from "./FinanceTab"
 import { InventoryTab } from "./InventoryTab"
+import { MonthClosingDialog } from "./MonthClosingDialog"
+import { monthLabel } from "./monthClosingText"
 import { ResultsTab } from "./ResultsTab"
 import { SalesTab } from "./SalesTab"
+import { TaxBookTab } from "./TaxBookTab"
 
 /** Meses y años que se piden más: se calculan sobre el día de hoy en Caracas. */
 function presetRange(id: string, today: string) {
@@ -42,6 +47,16 @@ export function ReportsPage() {
   const period =
     range.from === range.to ? day(range.from) : `${day(range.from)} al ${day(range.to)}`
   const business = boot.data?.business.name ?? ""
+  const prev = previousRange(range)
+  const compare = {
+    bounds: { from: dayRange(prev.from).from, to: dayRange(prev.to).to },
+    label: prev.label,
+    period: prev.from === prev.to ? day(prev.from) : `${day(prev.from)} al ${day(prev.to)}`,
+  }
+  // Un mes (entero o lo que va): se puede mandar su cierre.
+  const oneMonth =
+    valid && range.from.endsWith("-01") && range.from.slice(0, 7) === range.to.slice(0, 7)
+  const [closingMonth, setClosingMonth] = useState(false)
   const preset = PRESETS.find((p) => {
     const r = presetRange(p.id, today)
     return r.from === range.from && r.to === range.to
@@ -49,23 +64,57 @@ export function ReportsPage() {
 
   return (
     <div className="grid grid-cols-1 gap-4">
-      <h1 className="font-semibold text-xl print:hidden">Informes</h1>
+      <div className="flex flex-wrap items-center gap-2 print:hidden">
+        <h1 className="mr-auto font-semibold text-xl">Informes</h1>
+        {oneMonth ? (
+          <Button variant="outline" size="sm" onClick={() => setClosingMonth(true)}>
+            <MessageCircleIcon /> Cierre del mes
+          </Button>
+        ) : null}
+      </div>
+      {closingMonth && oneMonth ? (
+        <MonthClosingDialog
+          bounds={bounds}
+          previous={compare.bounds}
+          label={monthLabel(range)}
+          onClose={() => setClosingMonth(false)}
+        />
+      ) : null}
 
       <Tabs defaultValue="resultados" className="grid grid-cols-1 gap-4">
-        <TabsList className="print:hidden">
-          <TabsTrigger value="resultados">Resultados</TabsTrigger>
-          <TabsTrigger value="ventas">Ventas</TabsTrigger>
-          <TabsTrigger value="inventario">Inventario</TabsTrigger>
-          <TabsTrigger value="finanzas">Finanzas</TabsTrigger>
+        <TabsList className="h-auto flex-wrap print:hidden">
+          <TabsTrigger value="resultados" className="h-8">
+            Resultados
+          </TabsTrigger>
+          <TabsTrigger value="ventas" className="h-8">
+            Ventas
+          </TabsTrigger>
+          <TabsTrigger value="libro" className="h-8">
+            Libro de IVA
+          </TabsTrigger>
+          <TabsTrigger value="inventario" className="h-8">
+            Inventario
+          </TabsTrigger>
+          <TabsTrigger value="finanzas" className="h-8">
+            Finanzas
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="resultados" className="grid grid-cols-1 gap-4">
           <Period range={range} setRange={setRange} today={today} preset={preset?.id} />
-          {valid ? <ResultsTab bounds={bounds} period={period} business={business} /> : null}
+          {valid ? (
+            <ResultsTab bounds={bounds} period={period} business={business} compare={compare} />
+          ) : null}
         </TabsContent>
         <TabsContent value="ventas" className="grid grid-cols-1 gap-4">
           <Period range={range} setRange={setRange} today={today} preset={preset?.id} />
-          {valid ? <SalesTab bounds={bounds} period={period} business={business} /> : null}
+          {valid ? (
+            <SalesTab bounds={bounds} period={period} business={business} compare={compare} />
+          ) : null}
+        </TabsContent>
+        <TabsContent value="libro" className="grid grid-cols-1 gap-4">
+          <Period range={range} setRange={setRange} today={today} preset={preset?.id} />
+          {valid ? <TaxBookTab bounds={bounds} period={period} business={business} /> : null}
         </TabsContent>
         <TabsContent value="inventario">
           <InventoryTab business={business} today={day(today)} />

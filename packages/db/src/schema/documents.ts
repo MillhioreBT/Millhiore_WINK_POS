@@ -10,7 +10,7 @@ import {
   text,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core"
-import { stockReason, tax, variant } from "./catalog"
+import { discountCode, saleCharge, stockReason, tax, variant } from "./catalog"
 import { contact } from "./contacts"
 import { currency, location, terminal } from "./core"
 import { account, cashShift, expenseCategory, paymentMethod, surcharge } from "./finance"
@@ -30,9 +30,12 @@ export const document = sqliteTable(
     terminalId: text("terminal_id")
       .notNull()
       .references(() => terminal.id),
+    /** Ubicación cuya existencia mueve el documento; en un traslado, el origen. */
     locationId: text("location_id")
       .notNull()
       .references(() => location.id),
+    /** Traslado (`STOCK_TRANSFER`): la ubicación a la que llega la mercancía. */
+    toLocationId: text("to_location_id").references(() => location.id),
     currency: text("currency")
       .notNull()
       .references(() => currency.code),
@@ -79,6 +82,8 @@ export const document = sqliteTable(
     expenseCategoryId: text("expense_category_id").references(() => expenseCategory.id),
     /** Ajuste de inventario (`ADJUSTMENT`): por qué cambió la existencia. */
     stockReasonId: text("stock_reason_id").references(() => stockReason.id),
+    /** Venta con código de descuento: cuál se usó (cuenta como un uso mientras no se anule). */
+    discountCodeId: text("discount_code_id").references(() => discountCode.id),
     note: text("note"),
     createdBy: text("created_by"),
     postedAt: integer("posted_at").notNull(),
@@ -220,6 +225,35 @@ export const documentSurcharge = sqliteTable(
     amountLegalMinor: integer("amount_legal_minor").notNull(),
   },
   (t) => [uniqueIndex("document_surcharge_order").on(t.documentId, t.position)],
+)
+
+/**
+ * Recargos de venta cobrados en el documento (delivery, servicio…), congelados al contabilizar: si
+ * luego cambia el recargo, la venta no. Suman al total como una línea más, con su IVA.
+ */
+export const documentCharge = sqliteTable(
+  "document_charge",
+  {
+    id: text("id").primaryKey(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => document.id),
+    position: integer("position").notNull(),
+    chargeId: text("charge_id")
+      .notNull()
+      .references(() => saleCharge.id),
+    name: text("name").notNull(),
+    kind: text("kind", { enum: ["percent", "fixed"] }).notNull(),
+    rateBp: integer("rate_bp").notNull(),
+    /** Porcentual: el subtotal sin IVA sobre el que se calculó; fijo: 0. */
+    baseMinor: integer("base_minor").notNull(),
+    /** Lo que suma a la venta, en su moneda (con el IVA si los precios lo incluyen). */
+    amountMinor: integer("amount_minor").notNull(),
+    amountLegalMinor: integer("amount_legal_minor").notNull(),
+    taxId: text("tax_id").references(() => tax.id),
+    taxRateBp: integer("tax_rate_bp").notNull(),
+  },
+  (t) => [uniqueIndex("document_charge_order").on(t.documentId, t.position)],
 )
 
 /**

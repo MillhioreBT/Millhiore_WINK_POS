@@ -20,24 +20,13 @@ import {
 import { useQuery } from "@tanstack/react-query"
 import { ListIcon } from "lucide-react"
 import { useState } from "react"
-import { dayRange, daysBefore, todayInCaracas } from "../../lib/days"
+import { dayRange, todayInCaracas } from "../../lib/days"
 import { formatDateTime, formatMoney, formatQty } from "../../lib/format"
 import { documentsQuery, stockAdjustmentsQuery, stockReasonsQuery } from "../../lib/queries"
 import { can, useMe } from "../../lib/session"
 import { DocumentDialog } from "../sales/SalesPage"
+import { PRESETS, presetRange } from "./period"
 import { StockReasonsDialog } from "./StockReasonsDialog"
-
-const PRESETS = [
-  { id: "today", label: "Hoy" },
-  { id: "week", label: "7 días" },
-  { id: "month", label: "Este mes" },
-] as const
-
-function presetRange(id: (typeof PRESETS)[number]["id"], today: string) {
-  if (id === "today") return { from: today, to: today }
-  if (id === "week") return { from: daysBefore(today, 6), to: today }
-  return { from: `${today.slice(0, 7)}-01`, to: today }
-}
 
 /** Qué mercancía salió o entró sin venta ni compra (merma, vencido, uso interno, conteos) y cuánto vale. */
 export function InventoryPage() {

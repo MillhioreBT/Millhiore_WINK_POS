@@ -1,4 +1,5 @@
 import type { CatalogItem } from "@millhiore/contracts"
+import { priceInList } from "@millhiore/domain"
 import {
   Button,
   Dialog,
@@ -15,9 +16,17 @@ import {
 import { useQuery } from "@tanstack/react-query"
 import { useState } from "react"
 import { toast } from "sonner"
+import { ScanButton } from "../../components/CameraScanner"
 import { ApiError, api, errorMessage } from "../../lib/api"
-import { formatPercent, parseAmount, toInputAmount, toInputQty } from "../../lib/format"
+import {
+  formatMoney,
+  formatPercent,
+  parseAmount,
+  toInputAmount,
+  toInputQty,
+} from "../../lib/format"
 import { bootstrapQuery, categoriesQuery, queryClient } from "../../lib/queries"
+import { adjustLabel } from "./PriceListsDialog"
 
 /** Crear (item = null) o editar un producto. */
 export function ProductDialog({
@@ -45,7 +54,19 @@ export function ProductDialog({
     barcode: item?.barcode ?? "",
     minStock: item?.minStockMilli == null ? "" : toInputQty(item.minStockMilli),
     active: item?.active ?? true,
+    tracksLots: item?.tracksLots ?? false,
   }))
+  const lotsOn = boot?.features.lots ?? false
+  const priceLists = boot?.features.priceLists ? boot.priceLists : []
+  // Precio propio en cada lista activa; vacío = el normal con el ajuste de la lista.
+  const [listPrices, setListPrices] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      priceLists.map((l) => {
+        const own = item && l.prices.find((p) => p.variantId === item.variantId)
+        return [l.id, own ? toInputAmount(own.priceMinor) : ""]
+      }),
+    ),
+  )
   const tracksStock = item ? item.tracksStock : form.kind === "good"
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
@@ -71,6 +92,17 @@ export function ProductDialog({
       setErrors({ minStock: "Escribe una cantidad, p. ej. 5" })
       return
     }
+    const listErrors: Record<string, string> = {}
+    const listBody = priceLists.map((l) => {
+      const text = listPrices[l.id]?.trim() ?? ""
+      const minor = text ? parseAmount(text) : null
+      if (text && minor === null) listErrors[`list-${l.id}`] = "Escribe un precio válido"
+      return { priceListId: l.id, priceMinor: minor }
+    })
+    if (Object.keys(listErrors).length) {
+      setErrors(listErrors)
+      return
+    }
     setBusy(true)
     setErrors({})
     const body = {
@@ -82,6 +114,8 @@ export function ProductDialog({
       barcode: form.barcode.trim() || null,
       ...(form.sku.trim() ? { sku: form.sku.trim() } : {}),
       ...(tracksStock ? { minStockMilli } : {}),
+      ...(tracksStock && lotsOn ? { tracksLots: form.tracksLots } : {}),
+      ...(listBody.length ? { listPrices: listBody } : {}),
     }
     try {
       if (item) {
@@ -94,7 +128,11 @@ export function ProductDialog({
         await api("/api/products", { body: { ...body, kind: form.kind } })
         toast.success(`${body.name} creado`)
       }
-      await queryClient.invalidateQueries({ queryKey: ["products"] })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["products"] }),
+        // La caja toma los precios de cada lista del arranque.
+        ...(listBody.length ? [queryClient.invalidateQueries({ queryKey: ["bootstrap"] })] : []),
+      ])
       onClose()
     } catch (err) {
       if (err instanceof ApiError && err.issues.length) {
@@ -144,6 +182,44 @@ export function ProductDialog({
               </NativeSelect>
             </Field>
           </div>
+          {priceLists.length ? (
+            <fieldset className="grid min-w-0 grid-cols-1 gap-3 rounded-lg border p-3 sm:grid-cols-2">
+              <legend className="px-1 text-muted-foreground text-sm">Precios por lista</legend>
+              {priceLists.map((l) => {
+                const base = parseAmount(form.price)
+                const fallback =
+                  base === null
+                    ? null
+                    : priceInList(
+                        "",
+                        { priceMinor: base, priceCurrency: form.currency },
+                        { adjustBp: l.adjustBp, prices: new Map() },
+                      )
+                return (
+                  <Field
+                    key={l.id}
+                    label={l.name}
+                    htmlFor={`p-list-${l.id}`}
+                    hint={
+                      fallback
+                        ? `Vacío: ${formatMoney(fallback.priceMinor, fallback.priceCurrency)} (${adjustLabel(l.adjustBp)})`
+                        : `Vacío: el precio normal (${adjustLabel(l.adjustBp)})`
+                    }
+                    error={errors[`list-${l.id}`]}
+                  >
+                    <Input
+                      id={`p-list-${l.id}`}
+                      inputMode="decimal"
+                      value={listPrices[l.id] ?? ""}
+                      onChange={(e) => setListPrices((s) => ({ ...s, [l.id]: e.target.value }))}
+                      placeholder="Opcional"
+                      className="tabular"
+                    />
+                  </Field>
+                )
+              })}
+            </fieldset>
+          ) : null}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field
               label="IVA"
@@ -198,12 +274,18 @@ export function ProductDialog({
           </Field>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label="Código de barras" htmlFor="p-barcode" error={errors.barcode}>
-              <Input
-                id="p-barcode"
-                value={form.barcode}
-                onChange={set("barcode")}
-                placeholder="Opcional"
-              />
+              <div className="flex gap-2">
+                <Input
+                  id="p-barcode"
+                  value={form.barcode}
+                  onChange={set("barcode")}
+                  placeholder="Opcional"
+                />
+                <ScanButton
+                  label="Leer el código con la cámara"
+                  onCode={(code) => setForm((f) => ({ ...f, barcode: code }))}
+                />
+              </div>
             </Field>
             <Field
               label="SKU"
@@ -230,6 +312,24 @@ export function ProductDialog({
                 className="tabular sm:w-40"
               />
             </Field>
+          ) : null}
+          {tracksStock && lotsOn ? (
+            <div className="flex items-start gap-3">
+              <input
+                id="p-lots"
+                type="checkbox"
+                className="mt-0.5 size-4 accent-[var(--primary)]"
+                checked={form.tracksLots}
+                onChange={set("tracksLots")}
+              />
+              <div className="grid gap-1">
+                <Label htmlFor="p-lots">Lleva lotes con vencimiento</Label>
+                <p className="text-muted-foreground text-xs">
+                  Al comprarlo se anota la fecha de vencimiento; se vende primero lo que vence
+                  antes.
+                </p>
+              </div>
+            </div>
           ) : null}
           {item ? (
             <div className="flex items-center gap-3">

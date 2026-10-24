@@ -200,13 +200,14 @@ export function resultsReport(
     commissions += toLegalAt(db, book, legal, p.commission, p.currency, p.postedAt) ?? 0
   }
 
+  // Lo devuelto a los proveedores resta de las compras.
   const purchases = db
     .select({
-      count: sql<number>`coalesce(sum(case when ${document.reversesDocumentId} is null then 1 else -1 end), 0)`,
-      total: sql<number>`coalesce(sum(${document.totalLegalMinor}), 0)`,
+      count: sql<number>`coalesce(sum(case when ${document.type} <> 'PURCHASE' then 0 when ${document.reversesDocumentId} is null then 1 else -1 end), 0)`,
+      total: sql<number>`coalesce(sum(case when ${document.type} = 'PURCHASE_RETURN' then -${document.totalLegalMinor} else ${document.totalLegalMinor} end), 0)`,
     })
     .from(document)
-    .where(and(eq(document.type, "PURCHASE"), inRange(from, to)))
+    .where(and(inArray(document.type, ["PURCHASE", "PURCHASE_RETURN"]), inRange(from, to)))
     .get()
 
   const net = sales.total - sales.tax
@@ -324,6 +325,8 @@ export function salesReport(
       variantId: string
       name: string
       sku: string
+      categoryId: string | null
+      category: string | null
       qtyMilli: number
       totalLegalMinor: number
       costLegalMinor: number
@@ -341,11 +344,14 @@ export function salesReport(
       costMinor: documentLine.costMinor,
       costCurrency: documentLine.costCurrency,
       kind: product.kind,
+      categoryId: product.categoryId,
+      category: category.name,
     })
     .from(documentLine)
     .innerJoin(document, eq(document.id, documentLine.documentId))
     .innerJoin(variant, eq(variant.id, documentLine.variantId))
     .innerJoin(product, eq(product.id, variant.productId))
+    .leftJoin(category, eq(category.id, product.categoryId))
     .where(and(inArray(document.type, ["SALE", "RETURN"]), inRange(from, to)))
     .all()) {
     const d = docInfo.get(l.documentId)
@@ -363,6 +369,8 @@ export function salesReport(
       variantId: l.variantId,
       name: l.name,
       sku: l.sku,
+      categoryId: l.categoryId,
+      category: l.category,
       qtyMilli: 0,
       totalLegalMinor: 0,
       costLegalMinor: 0,
@@ -396,6 +404,36 @@ export function salesReport(
     .filter((m) => m.amountMinor !== 0)
     .sort((a, b) => a.methodName.localeCompare(b.methodName, "es"))
 
+  // Por categoría: la suma de sus productos (con o sin categoría, todos los vendidos)
+  const categories = new Map<
+    string,
+    {
+      categoryId: string | null
+      name: string
+      products: number
+      totalLegalMinor: number
+      costLegalMinor: number
+      unknownCost: boolean
+    }
+  >()
+  for (const p of products.values()) {
+    if (p.qtyMilli === 0 && p.totalLegalMinor === 0) continue
+    const k = p.categoryId ?? ""
+    const row = categories.get(k) ?? {
+      categoryId: p.categoryId,
+      name: p.category ?? "Sin categoría",
+      products: 0,
+      totalLegalMinor: 0,
+      costLegalMinor: 0,
+      unknownCost: false,
+    }
+    row.products += 1
+    row.totalLegalMinor += p.totalLegalMinor
+    row.costLegalMinor += p.costLegalMinor
+    row.unknownCost ||= p.unknownCost
+    categories.set(k, row)
+  }
+
   const net = totals.total - totals.tax
   return {
     from,
@@ -427,17 +465,32 @@ export function salesReport(
         profitLegalMinor:
           opts.seeCost && !p.unknownCost ? p.totalLegalMinor - p.costLegalMinor : null,
       })),
+    byCategory: [...categories.values()]
+      .sort((a, b) => b.totalLegalMinor - a.totalLegalMinor || a.name.localeCompare(b.name, "es"))
+      .map((c) => ({
+        categoryId: c.categoryId,
+        name: c.name,
+        products: c.products,
+        totalLegalMinor: c.totalLegalMinor,
+        costLegalMinor: opts.seeCost && !c.unknownCost ? c.costLegalMinor : null,
+        profitLegalMinor:
+          opts.seeCost && !c.unknownCost ? c.totalLegalMinor - c.costLegalMinor : null,
+      })),
     byMethod,
     byUser: [...users.values()].sort((a, b) => b.totalLegalMinor - a.totalLegalMinor),
   }
 }
 
 /** El inventario de hoy: existencia, costo, lo que vale a costo y a precio de venta, producto por producto. */
-export function inventoryReport(db: Db, opts: { now: number; seeCost: boolean }): InventoryReport {
+export function inventoryReport(
+  db: Db,
+  opts: { now: number; seeCost: boolean; locationId?: string | undefined },
+): InventoryReport {
   const { biz, book } = setup(db)
   const legal = biz.legalCurrency
+  const here = opts.locationId ? sql` and ${stockBalance.locationId} = ${opts.locationId}` : sql``
   const stock = sql<number>`coalesce((select sum(${stockBalance.qtyMilli}) from ${stockBalance}
-    where ${stockBalance.variantId} = ${variant.id}), 0)`
+    where ${stockBalance.variantId} = ${variant.id}${here}), 0)`
   const categories = alias(category, "cat")
   const rows = db
     .select({

@@ -17,13 +17,8 @@ import { useState } from "react"
 import { toast } from "sonner"
 import { api, errorMessage } from "../../lib/api"
 import { formatMoney, formatRate, parseAmount, toInputAmount } from "../../lib/format"
-import {
-  accountsQuery,
-  bootstrapQuery,
-  currentShiftQuery,
-  queryClient,
-  rateStatusQuery,
-} from "../../lib/queries"
+import { accountsQuery, currentShiftQuery, queryClient, rateStatusQuery } from "../../lib/queries"
+import { useTerminal } from "../../lib/terminal"
 
 const REFRESH = ["accounts", "transfers", "documents", "reports", "shifts", "bootstrap"]
 
@@ -52,11 +47,10 @@ export function TransferDialog({
   onClose: () => void
   onPosted: (documentId: string) => void
 }) {
-  const boot = useQuery(bootstrapQuery)
   const accounts = useQuery(accountsQuery())
   const rate = useQuery(rateStatusQuery)
   const list = accounts.data ?? []
-  const terminalId = boot.data?.terminals[0]?.id ?? ""
+  const terminalId = useTerminal()?.id ?? ""
   const shift = useQuery({ ...currentShiftQuery(terminalId), enabled: terminalId !== "" })
 
   const [fromId, setFromId] = useState(initialFrom ?? "")

@@ -7,9 +7,11 @@ import {
   currency,
   type Db,
   document,
+  documentCharge,
   documentLine,
   documentSurcharge,
   documentTax,
+  lotBalance,
   payment,
   stockBalance,
   stockMove,
@@ -25,13 +27,16 @@ import {
   isValidLineTax,
   legalConverter,
   lineTotal,
+  type PlannedCharge,
+  planCharges,
   roundToInteger,
   type SurchargeGroup,
   settle,
   type TaxGroup,
   type ToLegal,
+  taxEntries,
 } from "@millhiore/domain"
-import { asc, eq, sql } from "drizzle-orm"
+import { asc, eq, isNotNull, sql } from "drizzle-orm"
 
 export interface Violation {
   /** Número de invariante según PLAN.md §6. */
@@ -44,6 +49,7 @@ const IMMUTABLE_TABLES = [
   "document_line",
   "document_tax",
   "document_surcharge",
+  "document_charge",
   "payment",
   "stock_move",
   "account_move",
@@ -92,6 +98,34 @@ export function checkInvariants(db: Db): Violation[] {
       .map((b) => [`${b.variantId}@${b.locationId}`, b.qtyMilli]),
   )
   for (const m of diffMaps(moved, balances)) add(1, `stock ${m}`)
+
+  // 1b. lot_balance = Σ stock_move por (lote, ubicación), y cada lote es del producto que mueve
+  const movedLots = new Map<string, number>()
+  for (const r of db
+    .select({
+      lot: stockMove.lotId,
+      l: stockMove.locationId,
+      q: sql<number>`sum(${stockMove.qtyMilli})`,
+    })
+    .from(stockMove)
+    .where(isNotNull(stockMove.lotId))
+    .groupBy(stockMove.lotId, stockMove.locationId)
+    .all()) {
+    movedLots.set(`${r.lot}@${r.l}`, r.q)
+  }
+  const lotBalances = new Map(
+    db
+      .select()
+      .from(lotBalance)
+      .all()
+      .map((b) => [`${b.lotId}@${b.locationId}`, b.qtyMilli]),
+  )
+  for (const m of diffMaps(movedLots, lotBalances)) add(1, `lote ${m}`)
+  const strays = db.all<{ n: number }>(
+    sql`select count(*) as n from stock_move m join lot on lot.id = m.lot_id
+        where lot.variant_id <> m.variant_id`,
+  )[0]?.n
+  if (strays) add(1, `${strays} movimientos con un lote de otro producto`)
 
   // 2. account_balance = Σ account_move por cuenta
   const flows = new Map<string, number>()
@@ -156,6 +190,10 @@ export function checkInvariants(db: Db): Violation[] {
   const surchargesByDoc = byDocument(
     db.select().from(documentSurcharge).orderBy(asc(documentSurcharge.position)).all(),
   )
+  const chargesByDoc = byDocument(
+    db.select().from(documentCharge).orderBy(asc(documentCharge.position)).all(),
+  )
+  const stockByDoc = byDocument(db.select().from(stockMove).all())
   // El orden de los pagos importa para repartir la base del recargo: el de inserción.
   const paymentsByDoc = byDocument(db.select().from(payment).orderBy(sql`rowid`).all())
   const reasons = new Map(
@@ -217,21 +255,130 @@ export function checkInvariants(db: Db): Violation[] {
     }
     const kindOf = (taxId: string, rateBp: number) =>
       storedTaxes.find((t) => t.taxId === taxId && t.rateBp === rateBp)?.kind ?? "taxed"
+    const taxOf = (taxId: string | null, rateBp: number) =>
+      taxId ? { taxId, kind: kindOf(taxId, rateBp), rateBp } : null
+    const lineEntries = (linesByDoc.get(d.id) ?? []).map((l) => ({
+      lineTotalMinor: l.lineTotalMinor,
+      tax: taxOf(l.taxId, l.taxRateBp),
+    }))
+    // Los recargos de venta (delivery, servicio) suman al desglose como líneas, con su IVA.
+    const docCharges = chargesByDoc.get(d.id) ?? []
     const expectedTaxes =
-      d.type === "ADJUSTMENT"
+      d.type === "ADJUSTMENT" || d.type === "STOCK_TRANSFER"
         ? []
         : computeTaxes(
-            (linesByDoc.get(d.id) ?? []).map((l) => ({
-              lineTotalMinor: l.lineTotalMinor,
-              tax: l.taxId
-                ? { taxId: l.taxId, kind: kindOf(l.taxId, l.taxRateBp), rateBp: l.taxRateBp }
-                : null,
-            })),
+            taxEntries(
+              lineEntries,
+              docCharges.map((c) => ({
+                amountMinor: c.amountMinor,
+                tax: taxOf(c.taxId, c.taxRateBp),
+              })),
+            ),
             d.pricesIncludeTax,
             toLegal,
           )
     if (JSON.stringify(expectedTaxes) !== JSON.stringify(storedTaxes)) {
       add(5, `${d.number}: el desglose de IVA no coincide con sus líneas`)
+    }
+    if (docCharges.length && d.type !== "SALE") {
+      add(5, `${d.number}: solo una venta lleva recargos`)
+    }
+    // Un reverso lleva los recargos del original con signo contrario; una venta, los que salen de
+    // su configuración congelada: el porcentaje sobre el subtotal sin IVA de sus líneas.
+    const chargeShape = (c: Omit<PlannedCharge, "position">) => ({
+      chargeId: c.chargeId,
+      name: c.name,
+      kind: c.kind,
+      rateBp: c.rateBp,
+      baseMinor: c.baseMinor,
+      amountMinor: c.amountMinor,
+      amountLegalMinor: c.amountLegalMinor,
+      taxId: c.taxId,
+      taxRateBp: c.taxRateBp,
+    })
+    if (d.reversesDocumentId) {
+      const expected = (chargesByDoc.get(d.reversesDocumentId) ?? []).map((c) => ({
+        ...chargeShape(c),
+        baseMinor: -c.baseMinor,
+        amountMinor: -c.amountMinor,
+        amountLegalMinor: -c.amountLegalMinor,
+      }))
+      if (JSON.stringify(expected) !== JSON.stringify(docCharges.map(chargeShape))) {
+        add(5, `${d.number}: los recargos no son los del documento que anula`)
+      }
+    } else if (docCharges.length) {
+      const replanned = planCharges(
+        docCharges.map((c) => ({
+          chargeId: c.chargeId,
+          name: c.name,
+          kind: c.kind,
+          rateBp: c.rateBp,
+          amountMinor: c.amountMinor,
+          tax: taxOf(c.taxId, c.taxRateBp),
+        })),
+        computeTaxes(lineEntries, d.pricesIncludeTax, toLegal),
+        d.pricesIncludeTax,
+        toLegal,
+      )
+      if (
+        JSON.stringify(replanned.map(chargeShape)) !== JSON.stringify(docCharges.map(chargeShape))
+      ) {
+        add(5, `${d.number}: los recargos no salen de su configuración y sus líneas`)
+      }
+    }
+    // Traslados de inventario: sin precio, impuestos, pagos ni total; cada línea sale del origen y
+    // entra al destino (en el reverso, al revés).
+    if (d.type === "STOCK_TRANSFER") {
+      const docLines = linesByDoc.get(d.id) ?? []
+      const sign = d.reversesDocumentId ? -1 : 1
+      if (!d.toLocationId || d.toLocationId === d.locationId) {
+        add(5, `${d.number}: un traslado va de una ubicación a otra distinta`)
+      }
+      if (
+        storedTaxes.length > 0 ||
+        (paymentsByDoc.get(d.id) ?? []).length > 0 ||
+        d.totalMinor !== 0 ||
+        d.totalLegalMinor !== 0 ||
+        d.creditMinor !== 0
+      ) {
+        add(5, `${d.number}: un traslado no lleva impuestos, pagos ni total`)
+      }
+      if (
+        docLines.length === 0 ||
+        docLines.some(
+          (l) => Math.sign(l.qtyMilli) !== sign || l.unitPriceMinor !== 0 || l.lineTotalMinor !== 0,
+        )
+      ) {
+        add(5, `${d.number}: las líneas del traslado no tienen cantidades válidas`)
+      }
+      const expected = docLines
+        .flatMap((l) => [
+          `${l.id}@${d.locationId}:${-l.qtyMilli}`,
+          `${l.id}@${d.toLocationId}:${l.qtyMilli}`,
+        ])
+        .sort()
+      // Un producto con lotes reparte cada lado en varios movimientos: se suman por línea y
+      // ubicación, y cada lote que sale del origen entra igual al destino.
+      const byPlace = new Map<string, number>()
+      const byLot = new Map<string, number>()
+      for (const m of stockByDoc.get(d.id) ?? []) {
+        const place = `${m.documentLineId}@${m.locationId}`
+        byPlace.set(place, (byPlace.get(place) ?? 0) + m.qtyMilli)
+        const lotKey = `${m.documentLineId}#${m.lotId ?? "-"}`
+        byLot.set(lotKey, (byLot.get(lotKey) ?? 0) + m.qtyMilli)
+      }
+      const actual = [...byPlace].map(([place, qty]) => `${place}:${qty}`).sort()
+      if (JSON.stringify(expected) !== JSON.stringify(actual)) {
+        add(5, `${d.number}: lo que sale del origen no es lo que entra al destino`)
+      }
+      if ([...byLot.values()].some((qty) => qty !== 0)) {
+        add(5, `${d.number}: al destino no llegan los mismos lotes que salen del origen`)
+      }
+      continue
+    }
+    if (d.toLocationId) add(5, `${d.number}: solo un traslado lleva ubicación de destino`)
+    if (d.discountCodeId && d.type !== "SALE") {
+      add(5, `${d.number}: solo una venta lleva código de descuento`)
     }
     // Ingresos y retiros de caja: sin líneas ni impuestos; el total es la suma de sus montos.
     if (isCashMovement(d.type)) {
@@ -328,6 +475,49 @@ export function checkInvariants(db: Db): Violation[] {
       }
       continue
     }
+    // Deudas manuales: sin líneas ni impuestos; todo el total queda a crédito en su moneda y, si
+    // fue un préstamo, lo que movieron las cuentas es el monto (sale si le prestamos a un cliente,
+    // entra si nos prestó un proveedor).
+    if (d.type === "DEBT_IN" || d.type === "DEBT_OUT") {
+      const list = paymentsByDoc.get(d.id) ?? []
+      if ((linesByDoc.get(d.id) ?? []).length > 0 || storedTaxes.length > 0) {
+        add(5, `${d.number}: una deuda no lleva líneas ni impuestos`)
+      }
+      if (d.creditMinor !== d.totalMinor || d.creditCurrency !== d.currency) {
+        add(5, `${d.number}: toda la deuda queda a crédito en su moneda`)
+      }
+      if (
+        toLegal(d.totalMinor) !== d.totalLegalMinor ||
+        toLegal(d.creditMinor) !== d.creditLegalMinor
+      ) {
+        add(5, `${d.number}: la deuda en moneda legal no coincide con su conversión`)
+      }
+      const applied = appliedTo.get(d.id) ?? 0
+      if (!d.reversesDocumentId && (applied < 0 || applied > d.creditMinor)) {
+        add(5, `${d.number}: lo pagado (${applied}) no cabe en la deuda (${d.creditMinor})`)
+      }
+      // El reverso niega tanto el pago como el movimiento, así que el signo es el mismo.
+      const sign = d.type === "DEBT_IN" ? -1 : 1
+      for (const p of list) {
+        if (movedByPayment.get(p.id) !== sign * p.amountMinor) {
+          add(5, `${d.number}: la cuenta no movió lo prestado`)
+        }
+      }
+      if (list.length > 0) {
+        const s = settle(
+          d.currency,
+          Math.abs(d.totalMinor),
+          list.map((p) => ({
+            currency: p.currency,
+            amountMinor: Math.abs(p.amountMinor),
+            rate: rateOf(p),
+          })),
+          book,
+        )
+        if (!s.settled) add(5, `${d.number}: lo prestado no es el monto de la deuda`)
+      }
+      continue
+    }
     // Gastos: sin líneas ni impuestos; los pagos cubren el total (con la tolerancia de siempre) y
     // un gasto original dice en qué se gastó.
     if (d.type === "EXPENSE") {
@@ -392,7 +582,7 @@ export function checkInvariants(db: Db): Violation[] {
     if (d.type !== "SALE" && d.type !== "RETURN" && d.discountMinor !== 0) {
       add(5, `${d.number}: solo una venta o una devolución admite descuentos`)
     }
-    if (d.type === "RETURN") {
+    if (d.type === "RETURN" || d.type === "PURCHASE_RETURN") {
       const original = d.returnsDocumentId
         ? db
             .select({ type: document.type })
@@ -400,8 +590,9 @@ export function checkInvariants(db: Db): Violation[] {
             .where(eq(document.id, d.returnsDocumentId))
             .get()
         : undefined
-      if (!d.reversesDocumentId && original?.type !== "SALE") {
-        add(5, `${d.number}: una devolución debe ser de una venta`)
+      const of = d.type === "RETURN" ? "SALE" : "PURCHASE"
+      if (!d.reversesDocumentId && original?.type !== of) {
+        add(5, `${d.number}: una devolución debe ser de una ${of === "SALE" ? "venta" : "compra"}`)
       }
     }
     if (d.type !== "SALE" && d.type !== "PURCHASE" && d.creditMinor !== 0) {
@@ -498,7 +689,7 @@ export function checkInvariants(db: Db): Violation[] {
       [
         ...payments,
         ...(creditPayment ? [creditPayment] : []),
-        ...(d.type === "RETURN" ? applied : []),
+        ...(d.type === "RETURN" || d.type === "PURCHASE_RETURN" ? applied : []),
       ],
       book,
     )

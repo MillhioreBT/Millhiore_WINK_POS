@@ -74,6 +74,12 @@ export function formatDay(ms: number): string {
   return dateOnly.format(ms)
 }
 
+/** Una fecha AAAA-MM-DD (un vencimiento) como 12/11/26. */
+export function formatDate(iso: string): string {
+  const [y, m, d] = iso.split("-")
+  return `${d}/${m}/${y?.slice(2)}`
+}
+
 /**
  * Lee un monto escrito por una persona y lo devuelve en unidades menores, o null si no es válido.
  * Acepta "1.018,37", "1018,37", "1018.37" y "1,5". Con solo puntos, "1.50" es decimal y "1.500"

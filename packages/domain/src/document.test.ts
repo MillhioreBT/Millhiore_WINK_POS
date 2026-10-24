@@ -300,6 +300,107 @@ describe("planPosting · ingresos y retiros de caja", () => {
   })
 })
 
+describe("planPosting · deudas anotadas a mano", () => {
+  const debt = (
+    type: "DEBT_IN" | "DEBT_OUT",
+    amountMinor: number,
+    over: Partial<DocumentDraft> = {},
+  ) =>
+    sale({
+      type,
+      lines: [],
+      payments: [],
+      amountMinor,
+      creditMinor: amountMinor,
+      creditCurrency: "USD",
+      ...over,
+    })
+
+  test("un saldo de antes queda todo a crédito, sin IVA ni mover dinero", () => {
+    const plan = planPosting(debt("DEBT_IN", 2500), book)
+    expect(plan).toMatchObject({
+      totalMinor: 2500,
+      totalLegalMinor: 91250,
+      creditMinor: 2500,
+      creditCurrency: "USD",
+      creditLegalMinor: 91250,
+      taxes: [],
+      stockMoves: [],
+      accountMoves: [],
+    })
+  })
+
+  test("un préstamo a un cliente saca dinero; uno de un proveedor lo mete", () => {
+    const lent = planPosting(debt("DEBT_IN", 1000, { payments: [pay("p1", "USD", 1000)] }), book)
+    expect(lent.accountMoves.map((m) => m.amountMinor)).toEqual([-1000])
+    const borrowed = planPosting(
+      debt("DEBT_OUT", 1000, { payments: [pay("p1", "USD", 600), pay("p2", "VES", 14600)] }),
+      book,
+    )
+    expect(borrowed.accountMoves.map((m) => m.amountMinor)).toEqual([600, 14600])
+  })
+
+  test("rechaza productos, montos no positivos, crédito parcial o lo prestado distinto", () => {
+    expect(codeOf(() => planPosting(debt("DEBT_IN", 100, { lines: [ln(1000, 100)] }), book))).toBe(
+      "INVALID_LINE",
+    )
+    expect(codeOf(() => planPosting(debt("DEBT_OUT", 0), book))).toBe("INVALID_PAYMENT")
+    expect(codeOf(() => planPosting(debt("DEBT_IN", 100, { creditMinor: 50 }), book))).toBe(
+      "INVALID_PAYMENT",
+    )
+    expect(
+      codeOf(() => planPosting(debt("DEBT_IN", 100, { payments: [pay("p1", "USD", 90)] }), book)),
+    ).toBe("UNSETTLED")
+  })
+})
+
+describe("planPosting · traslados de inventario", () => {
+  const transfer = (over: Partial<DocumentDraft> = {}) =>
+    sale({
+      type: "STOCK_TRANSFER",
+      rate: null,
+      currency: "VES",
+      payments: [],
+      lines: [ln(3000, 0), ln(500, 0, { variantId: "v2" })],
+      locationId: "tienda",
+      toLocationId: "deposito",
+      ...over,
+    })
+
+  test("cada línea sale del origen y entra al destino, sin dinero ni total", () => {
+    const plan = planPosting(transfer(), book)
+    expect(plan.stockMoves).toEqual([
+      { lineNo: 1, variantId: "v1", locationId: "tienda", qtyMilli: -3000 },
+      { lineNo: 1, variantId: "v1", locationId: "deposito", qtyMilli: 3000 },
+      { lineNo: 2, variantId: "v2", locationId: "tienda", qtyMilli: -500 },
+      { lineNo: 2, variantId: "v2", locationId: "deposito", qtyMilli: 500 },
+    ])
+    expect(plan).toMatchObject({ totalMinor: 0, totalLegalMinor: 0, taxes: [], accountMoves: [] })
+    expect(plan.lines.map((l) => l.lineTotalMinor)).toEqual([0, 0])
+  })
+
+  test("rechaza el mismo destino, cantidades no positivas, precios, servicios y pagos", () => {
+    expect(codeOf(() => planPosting(transfer({ toLocationId: "tienda" }), book))).toBe(
+      "INVALID_LINE",
+    )
+    const { toLocationId: _, ...noDestination } = transfer()
+    expect(codeOf(() => planPosting(noDestination, book))).toBe("INVALID_LINE")
+    expect(codeOf(() => planPosting(transfer({ lines: [ln(-1000, 0)] }), book))).toBe(
+      "INVALID_LINE",
+    )
+    expect(codeOf(() => planPosting(transfer({ lines: [ln(1000, 10)] }), book))).toBe(
+      "INVALID_LINE",
+    )
+    expect(
+      codeOf(() => planPosting(transfer({ lines: [ln(1000, 0, { tracksStock: false })] }), book)),
+    ).toBe("INVALID_LINE")
+    expect(codeOf(() => planPosting(transfer({ lines: [] }), book))).toBe("EMPTY_DOCUMENT")
+    expect(codeOf(() => planPosting(transfer({ payments: [pay("p", "VES", 1)] }), book))).toBe(
+      "INVALID_PAYMENT",
+    )
+  })
+})
+
 describe("planPosting · PURCHASE y ADJUSTMENT", () => {
   test("la compra suma stock y saca dinero", () => {
     const plan = planPosting(sale({ type: "PURCHASE" }), book)
@@ -381,5 +482,129 @@ describe("uuidv7", () => {
   test("rechaza lo que no es v7", () => {
     expect(isUuidv7("not-a-uuid")).toBe(false)
     expect(isUuidv7(crypto.randomUUID())).toBe(false) // v4
+  })
+})
+
+describe("planPosting · recargos de venta", () => {
+  const delivery = { chargeId: "delivery", name: "Delivery", kind: "fixed" as const, rateBp: 0 }
+  const service = {
+    chargeId: "servicio",
+    name: "Servicio",
+    kind: "percent" as const,
+    amountMinor: 0,
+  }
+
+  test("un recargo fijo sin IVA suma al total como no sujeto", () => {
+    // 2 × 5,00 $ con IVA incluido + 2,00 $ de delivery.
+    const plan = planPosting(
+      sale({
+        lines: [ln(2000, 500, { tax: IVA })],
+        charges: [{ ...delivery, amountMinor: 200, tax: null }],
+        payments: [pay("p1", "USD", 1200)],
+      }),
+      book,
+    )
+    expect(plan.totalMinor).toBe(1200)
+    expect(plan.charges).toEqual([
+      {
+        position: 1,
+        chargeId: "delivery",
+        name: "Delivery",
+        kind: "fixed",
+        rateBp: 0,
+        baseMinor: 0,
+        amountMinor: 200,
+        amountLegalMinor: 7300,
+        taxId: null,
+        taxRateBp: 0,
+      },
+    ])
+    expect(plan.taxes.map((t) => [t.kind, t.baseMinor, t.taxMinor])).toEqual([
+      ["taxed", 862, 138],
+      ["not_subject", 200, 0],
+    ])
+  })
+
+  test("un porcentaje se calcula sobre el subtotal sin IVA de los productos", () => {
+    // Base 8,62 $ (10,00 con IVA): 10 % = 0,86 $ sin IVA.
+    const plan = planPosting(
+      sale({
+        lines: [ln(2000, 500, { tax: IVA })],
+        charges: [{ ...service, rateBp: 1000, tax: null }],
+        payments: [pay("p1", "USD", 1086)],
+      }),
+      book,
+    )
+    expect(plan.charges[0]).toMatchObject({ baseMinor: 862, amountMinor: 86 })
+    expect(plan.totalMinor).toBe(1086)
+  })
+
+  test("un porcentaje con IVA le suma su IVA si los precios lo incluyen", () => {
+    const included = planPosting(
+      sale({
+        lines: [ln(2000, 500, { tax: IVA })],
+        charges: [{ ...service, rateBp: 1000, tax: IVA }],
+        payments: [pay("p1", "USD", 1100)],
+      }),
+      book,
+    )
+    // 0,86 + 16 % = 1,00 (0,9976 → 1,00 con el IVA redondeado aparte: 0,86 + 0,14).
+    expect(included.charges[0]?.amountMinor).toBe(100)
+    expect(included.taxes).toHaveLength(1)
+    expect(included.totalMinor).toBe(1100)
+
+    const excluded = planPosting(
+      sale({
+        pricesIncludeTax: false,
+        lines: [ln(2000, 500, { tax: IVA })],
+        charges: [{ ...service, rateBp: 1000, tax: IVA }],
+        // Base 10,00 + recargo 1,00 = 11,00; IVA 16 % = 1,76.
+        payments: [pay("p1", "USD", 1276)],
+      }),
+      book,
+    )
+    expect(excluded.charges[0]?.amountMinor).toBe(100)
+    expect(excluded.taxes[0]).toMatchObject({ baseMinor: 1100, taxMinor: 176 })
+  })
+
+  test("el IGTF también cubre el recargo pagado en divisas", () => {
+    const plan = planPosting(
+      sale({
+        lines: [ln(1000, 1000, { tax: EXEMPT })],
+        charges: [{ ...delivery, amountMinor: 300, tax: null }],
+        payments: [{ ...pay("p1", "USD", 1339), surcharge: IGTF }],
+      }),
+      book,
+    )
+    expect(plan.surcharges[0]).toMatchObject({ baseMinor: 1300, amountMinor: 39 })
+  })
+
+  test("los de monto cero no se guardan; repetidos, inválidos o fuera de una venta se rechazan", () => {
+    const zero = planPosting(sale({ charges: [{ ...delivery, amountMinor: 0, tax: null }] }), book)
+    expect(zero.charges).toEqual([])
+    const twice = { ...delivery, amountMinor: 100, tax: null }
+    expect(codeOf(() => planPosting(sale({ charges: [twice, twice] }), book))).toBe("INVALID_LINE")
+    expect(
+      codeOf(() =>
+        planPosting(sale({ charges: [{ ...service, rateBp: 20_000, tax: null }] }), book),
+      ),
+    ).toBe("INVALID_LINE")
+    expect(
+      codeOf(() =>
+        planPosting(sale({ charges: [{ ...delivery, amountMinor: -1, tax: null }] }), book),
+      ),
+    ).toBe("INVALID_LINE")
+    expect(
+      codeOf(() =>
+        planPosting(
+          sale({
+            type: "PURCHASE",
+            charges: [{ ...delivery, amountMinor: 100, tax: null }],
+            payments: [{ ...pay("p1", "USD", 1100) }],
+          }),
+          book,
+        ),
+      ),
+    ).toBe("INVALID_LINE")
   })
 })

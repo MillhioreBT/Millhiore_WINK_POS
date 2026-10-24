@@ -51,6 +51,10 @@ const DOC_LABEL: Record<string, string> = {
   CASH_IN: "Ingreso de caja",
   CASH_OUT: "Retiro de caja",
   ADJUSTMENT: "Ajuste de inventario",
+  DEBT_IN: "Deuda de cliente",
+  DEBT_OUT: "Deuda con proveedor",
+  STOCK_TRANSFER: "Traslado",
+  PURCHASE_RETURN: "Devolución a proveedor",
 }
 
 const VOID_PERMISSION: Record<string, string> = {
@@ -64,6 +68,10 @@ const VOID_PERMISSION: Record<string, string> = {
   CASH_IN: "finance.manage",
   CASH_OUT: "finance.manage",
   ADJUSTMENT: "inventory.adjust",
+  DEBT_IN: "finance.manage",
+  DEBT_OUT: "payable.manage",
+  STOCK_TRANSFER: "inventory.adjust",
+  PURCHASE_RETURN: "purchase.void",
 }
 
 /** Detalle imprimible de un documento, con anulación si se tiene el permiso. */
@@ -78,9 +86,13 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
   const [reason, setReason] = useState("")
   const [busy, setBusy] = useState(false)
   const label = DOC_LABEL[doc.type] ?? "Documento"
-  // Se devuelve parte de una venta vigente; una venta anulada, un reverso o un abono no.
+  // Se devuelve parte de una venta (o, al proveedor, de una compra) vigente; una anulada, un
+  // reverso o un abono no.
   const canReturn =
-    doc.type === "SALE" && can(me, "sale.void") && !doc.reversesDocumentId && !doc.reversedBy
+    ((doc.type === "SALE" && can(me, "sale.void")) ||
+      (doc.type === "PURCHASE" && can(me, "purchase.void"))) &&
+    !doc.reversesDocumentId &&
+    !doc.reversedBy
   const canVoid =
     can(me, VOID_PERMISSION[doc.type] ?? "-") && !doc.reversesDocumentId && !doc.reversedBy
 
@@ -103,6 +115,7 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
         queryClient.invalidateQueries({ queryKey: ["stock-adjustments"] }),
         queryClient.invalidateQueries({ queryKey: ["stock-reasons"] }),
         queryClient.invalidateQueries({ queryKey: ["transfers"] }),
+        queryClient.invalidateQueries({ queryKey: ["lots"] }),
       ])
       toast.success(`${label} ${doc.number} ${doc.type === "EXPENSE" ? "anulado" : "anulada"}`)
       onClose()
@@ -158,7 +171,7 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
         <DialogFooter>
           {canReturn && !confirming ? (
             <Button variant="outline" onClick={() => setReturning(true)}>
-              <Undo2Icon /> Devolver
+              <Undo2Icon /> {doc.type === "PURCHASE" ? "Devolver al proveedor" : "Devolver"}
             </Button>
           ) : null}
           {canVoid && !confirming ? (
@@ -182,7 +195,7 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
       </DialogContent>
       {returning ? (
         <ReturnDialog
-          saleId={doc.id}
+          documentId={doc.id}
           onClose={() => setReturning(false)}
           onPosted={(id) => {
             setReturning(false)

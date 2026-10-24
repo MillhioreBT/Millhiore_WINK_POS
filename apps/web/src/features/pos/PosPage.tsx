@@ -11,28 +11,36 @@ import {
   DialogHeader,
   DialogTitle,
   Input,
+  NativeSelect,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import {
   ArchiveIcon,
   ArrowLeftRightIcon,
+  CheckIcon,
   ClockIcon,
+  FileTextIcon,
   LockKeyholeIcon,
   MinusIcon,
   PauseIcon,
+  PencilIcon,
   PercentIcon,
   PlayIcon,
   PlusIcon,
-  ScanBarcodeIcon,
   SearchIcon,
   ShoppingCartIcon,
+  TicketPercentIcon,
   Trash2Icon,
   TriangleAlertIcon,
+  XIcon,
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
+import { ScanButton } from "../../components/CameraScanner"
+import { TerminalPicker } from "../../components/TerminalPicker"
 import { formatMoney, formatPercent, formatQty, formatTime } from "../../lib/format"
+import { stockAt } from "../../lib/locations"
 import { openDrawer } from "../../lib/printing"
 import {
   bootstrapQuery,
@@ -41,19 +49,27 @@ import {
   productsQuery,
   rateStatusQuery,
 } from "../../lib/queries"
-import { can, useMe } from "../../lib/session"
+import { findByCode } from "../../lib/scanner"
+import { can, useFeatures, useMe } from "../../lib/session"
+import { useTerminal } from "../../lib/terminal"
+import { QuoteDialog } from "../quotes/QuoteDialog"
+import { SaveQuoteDialog } from "../quotes/SaveQuoteDialog"
 import { ReceiptDialog } from "../sales/ReceiptDialog"
 import { CashMoveDialog, CloseShiftDialog, OpenShiftCard } from "../shifts/ShiftDialogs"
+import { ChargeAmountDialog } from "./ChargeAmountDialog"
 import { CheckoutDialog } from "./CheckoutDialog"
 import {
+  autoCharges,
   buildCart,
   type CartLine,
   convertMinor,
   type DiscountSpec,
   makeContext,
   type PosContext,
+  priceWithList,
   unitPriceInDoc,
 } from "./compute"
+import { DiscountCodeDialog } from "./DiscountCodeDialog"
 import { DiscountDialog } from "./DiscountDialog"
 import { type HeldTicket, type TicketLine, usePos } from "./store"
 
@@ -66,7 +82,14 @@ const finePointer = typeof window !== "undefined" && window.matchMedia?.("(point
 /** Ventas aparcadas: cuánto suman hoy y con qué productos, para retomarlas o descartarlas. */
 function HeldDialog({ ctx, onClose }: { ctx: PosContext; onClose: () => void }) {
   const { held, resume, discardHeld, lines } = usePos()
-  const total = (t: HeldTicket) => buildCart(ctx, t.lines, t.saleDiscount ?? null).ticket.totalMinor
+  const total = (t: HeldTicket) =>
+    buildCart(
+      ctx,
+      t.lines,
+      t.saleDiscount ?? null,
+      t.priceListId ?? null,
+      t.charges ?? autoCharges(ctx),
+    ).ticket.totalMinor
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
@@ -142,8 +165,21 @@ export function PosPage() {
     saleDiscount,
     setLineDiscount,
     setSaleDiscount,
+    priceListId,
+    setPriceList,
+    charges: chosenCharges,
+    setCharges,
+    quote,
+    detachQuote,
   } = usePos()
+  const [savingQuote, setSavingQuote] = useState(false)
+  const [quoteShown, setQuoteShown] = useState<string | null>(null)
+  const [editingCharge, setEditingCharge] = useState<string | null>(null)
   const canDiscount = can(me, "sale.discount")
+  // El de un código lo usa cualquiera; uno a mano, solo quien puede dar descuentos.
+  const saleDiscountUsed = saleDiscount?.code || canDiscount ? saleDiscount : null
+  const [askingCode, setAskingCode] = useState(false)
+  const features = useFeatures()
   const [discountFor, setDiscountFor] = useState<{ variantId: string | null } | null>(null)
   const [heldOpen, setHeldOpen] = useState(false)
   const [search, setSearch] = useState("")
@@ -152,7 +188,8 @@ export function PosPage() {
   const [dialog, setDialog] = useState<"cash" | "close" | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const ticketRef = useRef<HTMLDivElement>(null)
-  const terminalId = boot.data?.terminals[0]?.id
+  const terminal = useTerminal()
+  const terminalId = terminal?.id
   const shift = useQuery({ ...currentShiftQuery(terminalId ?? ""), enabled: !!terminalId })
 
   const ctx = useMemo(
@@ -160,11 +197,22 @@ export function PosPage() {
     [boot.data, rate.data],
   )
 
+  // Recargos de la venta: los elegidos o, si no se ha tocado nada, los que se agregan solos.
+  const activeCharges = useMemo(
+    () => chosenCharges ?? (ctx ? autoCharges(ctx) : []),
+    [chosenCharges, ctx],
+  )
   // Ticket en Bs con la tasa vigente. Una línea sin precio convertible bloquea el cobro.
   const cart = useMemo(
-    () => (ctx ? buildCart(ctx, lines, canDiscount ? saleDiscount : null) : null),
-    [ctx, lines, saleDiscount, canDiscount],
+    () => (ctx ? buildCart(ctx, lines, saleDiscountUsed, priceListId, activeCharges) : null),
+    [ctx, lines, saleDiscountUsed, priceListId, activeCharges],
   )
+  const toggleCharge = (chargeId: string) =>
+    setCharges(
+      activeCharges.some((c) => c.chargeId === chargeId)
+        ? activeCharges.filter((c) => c.chargeId !== chargeId)
+        : [...activeCharges, { chargeId }],
+    )
 
   const categories = useQuery(categoriesQuery())
   const [category, setCategory] = useState("")
@@ -223,6 +271,10 @@ export function PosPage() {
   }, [canCharge])
 
   const addItem = (item: CatalogItem) => {
+    const expired = terminal && item.expiry?.expiredByLocation[terminal.locationId]
+    if (terminal && expired && stockAt(item, terminal.locationId) - expired <= 0) {
+      toast.warning(`Lo que queda de ${item.name} está vencido: revisa antes de venderlo`)
+    }
     add(item)
     setSearch("")
     if (finePointer) searchRef.current?.focus()
@@ -274,7 +326,7 @@ export function PosPage() {
     if (pick) addItem(pick)
   }
 
-  if (!ctx || !cart || !boot.data || !terminalId || shift.isPending) {
+  if (!ctx || !cart || !boot.data || !terminal || !terminalId || shift.isPending) {
     return <p className="p-6 text-muted-foreground">Cargando la caja…</p>
   }
   if (!shift.data) {
@@ -318,10 +370,23 @@ export function PosPage() {
             placeholder={
               finePointer ? "Buscar producto o escanear código (F2)" : "Buscar producto o código"
             }
-            className="h-12 pr-10 pl-10 text-base"
+            className="h-12 pr-12 pl-10 text-base"
             aria-label="Buscar producto"
           />
-          <ScanBarcodeIcon className="pointer-events-none absolute top-1/2 right-3 size-5 -translate-y-1/2 text-muted-foreground" />
+          {/* Escanear con la cámara del celular o la PC; sigue leyendo hasta cerrarlo. */}
+          <ScanButton
+            continuous
+            className="absolute top-1/2 right-1.5 size-9 -translate-y-1/2 border-0 shadow-none"
+            onCode={(code) => {
+              const item = findByCode(products.data ?? [], code)
+              if (!item) {
+                toast.error(`No hay ningún producto con el código ${code}`)
+                return
+              }
+              addItem(item)
+              toast.success(`${item.name} agregado`)
+            }}
+          />
         </div>
         {chips.list.length ? (
           <div
@@ -361,7 +426,8 @@ export function PosPage() {
           ) : null}
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
             {filtered.map((p) => {
-              const unit = unitPriceInDoc(ctx, p.priceMinor, p.priceCurrency)
+              const price = priceWithList(ctx, priceListId, p.variantId, p)
+              const unit = unitPriceInDoc(ctx, price.priceMinor, price.priceCurrency)
               return (
                 <button
                   key={p.variantId}
@@ -375,18 +441,19 @@ export function PosPage() {
                       <span className="tabular font-semibold">
                         {unit === null ? "—" : formatMoney(unit, doc)}
                       </span>
-                      {p.priceCurrency !== doc ? (
+                      {price.priceCurrency !== doc ? (
                         <span className="tabular text-muted-foreground text-xs">
-                          {formatMoney(p.priceMinor, p.priceCurrency)}
+                          {formatMoney(price.priceMinor, price.priceCurrency)}
                         </span>
                       ) : null}
                     </span>
                     {p.tracksStock ? (
+                      // La caja vende de su ubicación: muestra lo que hay ahí.
                       <Badge
-                        variant={p.stockMilli > 0 ? "secondary" : "warning"}
+                        variant={stockAt(p, terminal.locationId) > 0 ? "secondary" : "warning"}
                         className="tabular"
                       >
-                        {formatQty(p.stockMilli)}
+                        {formatQty(stockAt(p, terminal.locationId))}
                       </Badge>
                     ) : null}
                   </span>
@@ -403,6 +470,7 @@ export function PosPage() {
         className="flex min-h-[420px] scroll-mt-20 flex-col overflow-hidden lg:min-h-0"
       >
         <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-2 text-xs">
+          <TerminalPicker boot={boot.data} id="pos-terminal" className="h-7 py-0 text-xs" />
           <span className="text-muted-foreground">
             Turno desde {formatTime(openShift.openedAt)}
             {openShift.openedBy ? ` · ${openShift.openedBy}` : ""}
@@ -435,6 +503,17 @@ export function PosPage() {
             ) : null}
             {lines.length ? (
               <>
+                {features.quotes ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setSavingQuote(true)}
+                    title="Guarda esta venta como cotización para el cliente"
+                    disabled={cart.missingRate}
+                  >
+                    <FileTextIcon /> Cotizar
+                  </Button>
+                ) : null}
                 <Button
                   variant="ghost"
                   size="sm"
@@ -453,6 +532,43 @@ export function PosPage() {
             ) : null}
           </span>
         </div>
+        {quote ? (
+          <div className="flex flex-wrap items-center gap-2 border-b bg-primary/5 px-4 py-2 text-sm">
+            <FileTextIcon className="size-4 shrink-0 text-primary" />
+            <span className="min-w-0 flex-1">
+              Cotización <span className="font-medium">{quote.number}</span>
+              {quote.contact ? ` · ${quote.contact.name}` : ""}
+              {quote.validUntil < Date.now() ? (
+                <span className="block text-warning-foreground text-xs dark:text-warning">
+                  Vencida: se venden los precios cotizados
+                </span>
+              ) : null}
+            </span>
+            <Button variant="ghost" size="sm" onClick={detachQuote}>
+              Quitar
+            </Button>
+          </div>
+        ) : null}
+        {ctx.priceLists.size && !quote ? (
+          <div className="flex items-center gap-2 border-b px-4 py-2 text-sm">
+            <label htmlFor="pos-price-list" className="text-muted-foreground">
+              Precios
+            </label>
+            <NativeSelect
+              id="pos-price-list"
+              value={priceListId && ctx.priceLists.has(priceListId) ? priceListId : ""}
+              onChange={(e) => setPriceList(e.target.value || null)}
+              className="h-8 w-auto min-w-40 py-1"
+            >
+              <option value="">Normales</option>
+              {[...ctx.priceLists.values()].map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </NativeSelect>
+          </div>
+        ) : null}
         <ul className="min-h-0 flex-1 divide-y overflow-y-auto">
           {cart.lines.length === 0 ? (
             <li className="p-8 text-center text-muted-foreground text-sm">
@@ -532,22 +648,99 @@ export function PosPage() {
                 <span className="tabular">{formatMoney(t.taxMinor, doc)}</span>
               </div>
             ))}
+          {ctx.charges.size && cart.lines.length ? (
+            <fieldset className="flex min-w-0 flex-wrap gap-1.5">
+              <legend className="sr-only">Recargos</legend>
+              {[...ctx.charges.values()].map((c) => {
+                const on = activeCharges.some((a) => a.chargeId === c.id)
+                return (
+                  <Button
+                    key={c.id}
+                    variant={on ? "secondary" : "outline"}
+                    size="sm"
+                    className="h-7 rounded-full px-2.5 text-xs"
+                    aria-pressed={on}
+                    onClick={() => toggleCharge(c.id)}
+                  >
+                    {on ? <CheckIcon /> : <PlusIcon />} {c.name}
+                    {c.kind === "percent" ? ` ${formatPercent(c.rateBp)}` : ""}
+                  </Button>
+                )
+              })}
+            </fieldset>
+          ) : null}
+          {cart.ticket.charges.map((c) => (
+            <div key={c.chargeId} className="flex items-center justify-between gap-2">
+              <span className="flex items-center gap-1">
+                {c.name}
+                {c.kind === "percent" ? ` ${formatPercent(c.rateBp)}` : ""}
+                {c.kind === "fixed" ? (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="size-6 text-muted-foreground"
+                    aria-label={`Cambiar el monto de ${c.name}`}
+                    title="Cambiar el monto"
+                    onClick={() => setEditingCharge(c.chargeId)}
+                  >
+                    <PencilIcon />
+                  </Button>
+                ) : null}
+              </span>
+              <span className="tabular">{formatMoney(c.amountMinor, doc)}</span>
+            </div>
+          ))}
           {cart.ticket.discountMinor > 0 ? (
             <div className="flex justify-between text-success">
               <span>Descuentos</span>
               <span className="tabular">-{formatMoney(cart.ticket.discountMinor, doc)}</span>
             </div>
           ) : null}
-          {canDiscount && cart.lines.length ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="justify-self-start px-2 text-muted-foreground"
-              onClick={() => setDiscountFor({ variantId: null })}
-            >
-              <PercentIcon />{" "}
-              {saleDiscount ? "Cambiar el descuento de la venta" : "Descuento a toda la venta"}
-            </Button>
+          {saleDiscount?.code && cart.lines.length ? (
+            <div className="flex items-center justify-between gap-2 text-success">
+              <span className="flex items-center gap-1">
+                <TicketPercentIcon className="size-4" /> Código {saleDiscount.code.code}
+                {saleDiscount.kind === "percent" ? ` (${formatPercent(saleDiscount.bp)})` : ""}
+              </span>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="size-6 text-muted-foreground"
+                aria-label={`Quitar el código ${saleDiscount.code.code}`}
+                title="Quitar el código"
+                onClick={() => setSaleDiscount(null)}
+              >
+                <XIcon />
+              </Button>
+            </div>
+          ) : null}
+          {cart.lines.length &&
+          (canDiscount || (boot.data.discountCodes > 0 && !saleDiscount?.code)) ? (
+            <span className="flex flex-wrap gap-1">
+              {canDiscount ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="px-2 text-muted-foreground"
+                  onClick={() => setDiscountFor({ variantId: null })}
+                >
+                  <PercentIcon />{" "}
+                  {saleDiscount && !saleDiscount.code
+                    ? "Cambiar el descuento de la venta"
+                    : "Descuento a toda la venta"}
+                </Button>
+              ) : null}
+              {boot.data.discountCodes > 0 && !saleDiscount?.code ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="px-2 text-muted-foreground"
+                  onClick={() => setAskingCode(true)}
+                >
+                  <TicketPercentIcon /> Código de descuento
+                </Button>
+              ) : null}
+            </span>
           ) : null}
           <div className="flex items-baseline justify-between">
             <span className="font-medium">Total</span>
@@ -572,6 +765,16 @@ export function PosPage() {
         </div>
       </Card>
 
+      {askingCode ? (
+        <DiscountCodeDialog
+          onApply={(spec) => {
+            setSaleDiscount(spec)
+            setAskingCode(false)
+            toast.success(`Código ${spec.code?.code} aplicado`)
+          }}
+          onClose={() => setAskingCode(false)}
+        />
+      ) : null}
       {checkoutOpen && terminalId ? (
         <CheckoutDialog
           ctx={ctx}
@@ -594,11 +797,46 @@ export function PosPage() {
         <CloseShiftDialog boot={boot.data} shift={openShift} onClose={() => setDialog(null)} />
       ) : null}
       {heldOpen ? <HeldDialog ctx={ctx} onClose={() => setHeldOpen(false)} /> : null}
+      {savingQuote ? (
+        <SaveQuoteDialog
+          ctx={ctx}
+          lines={lines}
+          ticket={cart.ticket}
+          priceListId={priceListId}
+          saleDiscount={saleDiscountUsed}
+          charges={activeCharges}
+          initialContact={quote?.contact ?? null}
+          onClose={() => setSavingQuote(false)}
+          onSaved={(saved) => {
+            setSavingQuote(false)
+            reset()
+            setQuoteShown(saved.id)
+          }}
+        />
+      ) : null}
+      {quoteShown ? <QuoteDialog quoteId={quoteShown} onClose={() => setQuoteShown(null)} /> : null}
+      {editingCharge ? (
+        <ChargeAmountDialog
+          ctx={ctx}
+          chargeId={editingCharge}
+          current={activeCharges.find((c) => c.chargeId === editingCharge)?.amount}
+          onApply={(amount) => {
+            setCharges(
+              activeCharges.map((c) =>
+                c.chargeId === editingCharge ? { chargeId: c.chargeId, amount } : c,
+              ),
+            )
+            setEditingCharge(null)
+          }}
+          onClose={() => setEditingCharge(null)}
+        />
+      ) : null}
       {discountFor ? (
         <DiscountForm
           ctx={ctx}
           lines={lines}
           cartLines={cart.lines}
+          priceListId={priceListId}
           saleDiscount={saleDiscount}
           target={discountFor.variantId}
           onLine={setLineDiscount}
@@ -652,6 +890,7 @@ function DiscountForm({
   ctx,
   lines,
   cartLines,
+  priceListId,
   saleDiscount,
   target,
   onLine,
@@ -661,6 +900,7 @@ function DiscountForm({
   ctx: PosContext
   lines: TicketLine[]
   cartLines: CartLine[]
+  priceListId: string | null
   saleDiscount: DiscountSpec | null
   target: string | null
   onLine: (variantId: string, spec: DiscountSpec | null) => void
@@ -669,7 +909,7 @@ function DiscountForm({
 }) {
   if (target === null) {
     // A toda la venta: la base es lo que vale el ticket sin el propio descuento de la venta.
-    const base = buildCart(ctx, lines, null).ticket
+    const base = buildCart(ctx, lines, null, priceListId).ticket
     const gross = base.lineTotals.reduce((acc, n) => acc + n, 0)
     return (
       <DiscountDialog

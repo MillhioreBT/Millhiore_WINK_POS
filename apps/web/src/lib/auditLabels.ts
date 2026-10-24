@@ -9,6 +9,13 @@ const ACTION_LABEL: Record<string, string> = {
   "rate.updated": "Cambió la tasa",
   "product.created": "Creó un producto",
   "product.updated": "Cambió un producto",
+  "product.prices.bulk": "Cambió precios en lote",
+  "price-list.created": "Creó una lista de precios",
+  "price-list.updated": "Cambió una lista de precios",
+  "charge.created": "Creó un recargo de venta",
+  "charge.updated": "Cambió un recargo de venta",
+  "quote.created": "Hizo una cotización",
+  "quote.cancelled": "Anuló una cotización",
   "expense.category.created": "Creó una categoría de gasto",
   "expense.category.updated": "Cambió una categoría de gasto",
   "stock.reason.created": "Creó un motivo de ajuste",
@@ -16,6 +23,14 @@ const ACTION_LABEL: Record<string, string> = {
   "payment-method.updated": "Cambió un método de pago",
   "account.created": "Creó una cuenta",
   "account.updated": "Cambió una cuenta",
+  "lot.updated": "Corrigió un lote",
+  "discount-code.created": "Creó un código de descuento",
+  "discount-code.updated": "Cambió un código de descuento",
+  "settings.lots.updated": "Cambió los días de aviso de vencimiento",
+  "location.created": "Creó una ubicación",
+  "location.updated": "Cambió una ubicación",
+  "terminal.created": "Creó una caja",
+  "terminal.updated": "Cambió una caja",
   "category.created": "Creó una categoría",
   "category.updated": "Cambió una categoría",
   "contact.created": "Creó un contacto",
@@ -46,9 +61,16 @@ export const ACTION_GROUPS: readonly { prefix: string; label: string }[] = [
   { prefix: "shift.", label: "Turnos" },
   { prefix: "rate.", label: "Tasa de cambio" },
   { prefix: "product.", label: "Productos" },
+  { prefix: "price-list.", label: "Listas de precios" },
+  { prefix: "charge.", label: "Recargos de venta" },
+  { prefix: "quote.", label: "Cotizaciones" },
   { prefix: "contact.", label: "Contactos" },
   { prefix: "account.", label: "Cuentas" },
   { prefix: "stock.", label: "Motivos de ajuste" },
+  { prefix: "lot.", label: "Lotes" },
+  { prefix: "discount-code.", label: "Códigos de descuento" },
+  { prefix: "location.", label: "Ubicaciones" },
+  { prefix: "terminal.", label: "Cajas" },
   { prefix: "payment-method.", label: "Métodos de pago" },
   { prefix: "expense.", label: "Categorías de gasto" },
   { prefix: "user.", label: "Usuarios, claves y PIN" },
@@ -67,6 +89,10 @@ const DOCUMENT_LABEL: Record<string, string> = {
   CASH_IN: "Ingreso de caja",
   CASH_OUT: "Retiro de caja",
   ADJUSTMENT: "Ajuste",
+  DEBT_IN: "Deuda de cliente",
+  DEBT_OUT: "Deuda con proveedor",
+  STOCK_TRANSFER: "Traslado",
+  PURCHASE_RETURN: "Devolución a proveedor",
 }
 
 /** Sobre qué fue, en una línea corta: el número del documento, o lo poco que guarda cada acción. */
@@ -77,6 +103,14 @@ export function entryDetail(entry: AuditEntry): string | null {
   if (entry.entityType === "document" && typeof d.number === "string") {
     const kind = typeof d.type === "string" ? (DOCUMENT_LABEL[d.type] ?? d.type) : "Documento"
     return `${kind} ${d.number}`
+  }
+  if (entry.entityType === "quote" && typeof d.number === "string") return `Cotización ${d.number}`
+  if (entry.entityType === "location" || entry.entityType === "terminal") {
+    const row = (d.after ?? d) as Record<string, unknown>
+    if (typeof row.name === "string") return row.name
+  }
+  if (entry.action === "product.prices.bulk" && typeof d.count === "number") {
+    return d.count === 1 ? "1 producto" : `${d.count} productos`
   }
   if (entry.action === "session.revoked.others" && typeof d.count === "number") {
     return d.count === 1 ? "1 sesión" : `${d.count} sesiones`

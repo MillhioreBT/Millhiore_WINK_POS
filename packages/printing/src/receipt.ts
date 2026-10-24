@@ -89,6 +89,10 @@ const TITLE: Record<string, string> = {
   CASH_IN: "INGRESO DE CAJA",
   CASH_OUT: "RETIRO DE CAJA",
   ADJUSTMENT: "AJUSTE DE INVENTARIO",
+  DEBT_IN: "CUENTA POR COBRAR · NO FISCAL",
+  DEBT_OUT: "CUENTA POR PAGAR",
+  STOCK_TRANSFER: "TRASLADO DE INVENTARIO",
+  PURCHASE_RETURN: "DEVOLUCIÓN A PROVEEDOR",
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -129,7 +133,10 @@ export function receiptLines(doc: DocumentDetail, business: Business, width: num
   if (doc.createdBy) out.push(...center(`Atendió: ${doc.createdBy}`))
   if (doc.contactName) {
     const who =
-      doc.type === "PURCHASE" || doc.type === "EXPENSE" || doc.type === "PAYMENT_OUT"
+      doc.type === "PURCHASE" ||
+      doc.type === "PURCHASE_RETURN" ||
+      doc.type === "EXPENSE" ||
+      doc.type === "PAYMENT_OUT"
         ? "Proveedor"
         : "Cliente"
     out.push(
@@ -138,11 +145,29 @@ export function receiptLines(doc: DocumentDetail, business: Business, width: num
   }
   if (doc.expenseCategoryName) out.push(...center(`Categoría: ${doc.expenseCategoryName}`))
   if (doc.stockReasonName) out.push(...center(`Motivo: ${doc.stockReasonName}`))
+  if (doc.discountCode) out.push(...center(`Código de descuento: ${doc.discountCode}`))
   if (doc.externalRef) out.push(...center(`Factura: ${doc.externalRef}`))
   if (doc.note) out.push(...center(doc.note))
-  if (doc.returnsNumber) out.push(...center(`Devolución de la venta ${doc.returnsNumber}`))
+  if (doc.returnsNumber) {
+    const of = doc.type === "PURCHASE_RETURN" ? "compra" : "venta"
+    out.push(...center(`Devolución de la ${of} ${doc.returnsNumber}`))
+  }
   if (doc.reversesDocumentId) out.push(...center("ANULACIÓN", true))
   if (doc.reversedBy) out.push(...center("*** ANULADA ***", true))
+
+  if (doc.type === "STOCK_TRANSFER") {
+    const reversed = doc.reversesDocumentId !== null
+    out.push(...center(`De: ${reversed ? doc.toLocationName : doc.locationName}`))
+    out.push(...center(`A: ${reversed ? doc.locationName : doc.toLocationName}`))
+    out.push(rule)
+    for (const l of doc.lines) {
+      out.push(...pair(l.name, qty.format(Math.abs(l.qtyMilli) / 1000)))
+    }
+    out.push(rule)
+    const units = doc.lines.reduce((acc, l) => acc + Math.abs(l.qtyMilli), 0)
+    out.push(...pair("UNIDADES", qty.format(units / 1000), true))
+    return out
+  }
 
   out.push(rule)
   if (doc.allocations.length) {
@@ -150,9 +175,11 @@ export function receiptLines(doc: DocumentDetail, business: Business, width: num
       text:
         doc.type === "RETURN"
           ? "Descontado de lo que debe:"
-          : doc.type === "PAYMENT_OUT"
-            ? "Pago de:"
-            : "Abono a:",
+          : doc.type === "PURCHASE_RETURN"
+            ? "Descontado de lo que se le debe:"
+            : doc.type === "PAYMENT_OUT"
+              ? "Pago de:"
+              : "Abono a:",
     })
     for (const a of doc.allocations) out.push(...pair(a.saleNumber, money(a.amountMinor, cur)))
     out.push(rule)
@@ -169,14 +196,24 @@ export function receiptLines(doc: DocumentDetail, business: Business, width: num
     )
     if (l.discountMinor !== 0) out.push(...pair("  Descuento", `-${money(l.discountMinor, cur)}`))
   }
+  // Recargos de la venta (delivery, servicio), después de los productos.
+  for (const c of doc.charges ?? []) {
+    const exempt = c.taxId && c.taxRateBp === 0 ? " (E)" : ""
+    const label = c.kind === "percent" ? `${c.name} ${percent(c.rateBp)}` : c.name
+    out.push(...pair(`${label}${exempt}`, money(c.amountMinor, cur)))
+  }
   out.push(rule)
 
-  for (const t of doc.taxes.filter((t) => t.taxId !== null)) {
+  // Sin impuesto asignado (negocio que no cobra IVA) no hay desglose; si cobra IVA, lo que no lo
+  // lleva (un recargo de servicio) sale como no sujeto.
+  const chargesVat = doc.taxes.some((t) => t.taxId !== null)
+  for (const t of doc.taxes.filter((t) => chargesVat && (t.taxId !== null || t.baseMinor !== 0))) {
     if (t.rateBp > 0) {
       out.push(...pair(`Base imponible ${percent(t.rateBp)}`, money(t.baseMinor, cur)))
       out.push(...pair(`IVA ${percent(t.rateBp)}`, money(t.taxMinor, cur)))
     } else {
-      out.push(...pair(`${KIND_LABEL[t.kind] ?? "Exento"} (E)`, money(t.baseMinor, cur)))
+      const code = t.kind === "not_subject" ? "" : " (E)"
+      out.push(...pair(`${KIND_LABEL[t.kind] ?? "Exento"}${code}`, money(t.baseMinor, cur)))
     }
   }
   out.push(
@@ -213,11 +250,13 @@ export function receiptLines(doc: DocumentDetail, business: Business, width: num
           ? `${i === 0 ? (reversed ? "Regresa a" : "Sale de") : reversed ? "Sale de" : "Entra en"} ${p.methodName}`
           : doc.type === "RETURN"
             ? `Reembolso (${p.methodName})`
-            : doc.type === "EXPENSE" || doc.type === "PAYMENT_OUT"
-              ? `Pagado (${p.methodName})`
-              : p.amountMinor < 0
-                ? `Vuelto (${p.methodName})`
-                : p.methodName
+            : doc.type === "PURCHASE_RETURN"
+              ? `Reembolso del proveedor (${p.methodName})`
+              : doc.type === "EXPENSE" || doc.type === "PAYMENT_OUT"
+                ? `Pagado (${p.methodName})`
+                : p.amountMinor < 0
+                  ? `Vuelto (${p.methodName})`
+                  : p.methodName
       out.push(...pair(label, money(Math.abs(p.amountMinor), p.currency)))
     }
   }

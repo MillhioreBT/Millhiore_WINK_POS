@@ -21,6 +21,7 @@ import { useQuery } from "@tanstack/react-query"
 import { LockKeyholeOpenIcon, PrinterIcon } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
+import { TerminalPicker } from "../../components/TerminalPicker"
 import { api, errorMessage } from "../../lib/api"
 import { parseAmount } from "../../lib/format"
 import { queryClient, rateStatusQuery, shiftReportQuery } from "../../lib/queries"
@@ -113,6 +114,11 @@ export function OpenShiftCard({
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4">
+          {boot.terminals.length > 1 ? (
+            <Field label="Caja de este equipo" htmlFor="open-terminal">
+              <TerminalPicker boot={boot} id="open-terminal" className="w-full" />
+            </Field>
+          ) : null}
           {canOpen ? (
             <>
               {accounts.map((a) => (

@@ -79,6 +79,10 @@ export function closingText(
       `${s.expenses.count} gasto${s.expenses.count === 1 ? "" : "s"}: ${formatMoney(s.expenses.totalLegalMinor, legal)}`,
     )
   }
+  // Merma, vencido, uso interno… a costo (solo si quien lo manda ve costos).
+  if (s.inventoryLossLegalMinor) {
+    out.push(`Pérdidas de inventario: ${formatMoney(s.inventoryLossLegalMinor, legal)}`)
+  }
 
   if (s.topProducts.length) {
     out.push("", bold("LO MÁS VENDIDO"))
@@ -87,6 +91,25 @@ export function closingText(
     })
   }
 
+  out.push(...debtLines(owed, owing))
+
+  if (s.lowStock?.length) {
+    out.push("", bold("POR REPONER"))
+    for (const p of s.lowStock.slice(0, 8)) {
+      out.push(`• ${p.name}: ${formatQty(p.stockMilli)}`)
+    }
+    if (s.lowStock.length > 8) out.push(`… y ${s.lowStock.length - 8} más`)
+  }
+
+  if (s.openShifts.length) {
+    out.push("", `Cajas abiertas: ${s.openShifts.map((sh) => sh.terminalName).join(", ")}`)
+  }
+  return out.join("\n")
+}
+
+/** Lo que deben los clientes y lo que se les debe a los proveedores, ahora mismo. */
+export function debtLines(owed: Receivables | null, owing: Payables | null): string[] {
+  const out: string[] = []
   if (owed?.totals.length) {
     out.push("", bold("POR COBRAR (FIADO)"))
     for (const t of owed.totals) {
@@ -106,17 +129,5 @@ export function closingText(
       )
     }
   }
-
-  if (s.lowStock?.length) {
-    out.push("", bold("POR REPONER"))
-    for (const p of s.lowStock.slice(0, 8)) {
-      out.push(`• ${p.name}: ${formatQty(p.stockMilli)}`)
-    }
-    if (s.lowStock.length > 8) out.push(`… y ${s.lowStock.length - 8} más`)
-  }
-
-  if (s.openShifts.length) {
-    out.push("", `Cajas abiertas: ${s.openShifts.map((sh) => sh.terminalName).join(", ")}`)
-  }
-  return out.join("\n")
+  return out
 }

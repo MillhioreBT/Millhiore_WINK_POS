@@ -5,15 +5,20 @@ import {
   business,
   currency,
   type Db,
+  discountCode,
   paymentMethod,
   surcharge,
   tax,
   terminal,
 } from "@millhiore/db"
-import { asc, eq } from "drizzle-orm"
+import { asc, eq, sql } from "drizzle-orm"
 import { actorOf } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
+import { priceListsForPos } from "../catalog/priceLists"
+import { chargesForPos } from "../charges/routes"
+import { features } from "../features/routes"
+import { listLocations } from "../locations/routes"
 import { printerSettings } from "../printing/service"
 import {
   autoLockMinutes,
@@ -70,6 +75,13 @@ export function bootstrap(db: Db): Bootstrap {
       .where(eq(terminal.active, true))
       .orderBy(asc(terminal.code))
       .all(),
+    locations: listLocations(db).map(({ id, name, kind }) => ({ id, name, kind })),
+    discountCodes:
+      db
+        .select({ n: sql<number>`count(*)` })
+        .from(discountCode)
+        .where(eq(discountCode.active, true))
+        .get()?.n ?? 0,
     currencies: db.select().from(currency).orderBy(asc(currency.code)).all(),
     // Orden estable para la caja: efectivo (Bs primero), pago móvil, punto de venta, billeteras.
     paymentMethods: methods
@@ -94,6 +106,9 @@ export function bootstrap(db: Db): Bootstrap {
     taxes: db.select().from(tax).orderBy(asc(tax.code)).all(),
     fiscal: fiscalSettings(db),
     credit: { enabled: creditEnabled(db) },
+    features: features(db),
+    priceLists: priceListsForPos(db),
+    charges: chargesForPos(db),
     security: { autoLockMinutes: autoLockMinutes(db) },
     printer: (({ mode, paperWidth, autoPrint, openDrawer }) => ({
       mode,

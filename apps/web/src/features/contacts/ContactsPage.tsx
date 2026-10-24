@@ -13,8 +13,10 @@ import {
   TableRow,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
-import { PencilIcon, PlusIcon, SearchIcon } from "lucide-react"
+import { PencilIcon, PlusIcon, SearchIcon, UploadIcon } from "lucide-react"
 import { useState } from "react"
+import { ImportDialog } from "../../components/ImportDialog"
+import { contactImport } from "../../lib/importConfigs"
 import { contactsQuery } from "../../lib/queries"
 import { can, useMe } from "../../lib/session"
 import { ContactDialog } from "./ContactDialog"
@@ -37,6 +39,7 @@ export function ContactsPage() {
     }),
   )
   const [editing, setEditing] = useState<Contact | null | undefined>(undefined)
+  const [importing, setImporting] = useState(false)
   const canEdit = can(me, "contact.manage")
 
   return (
@@ -63,6 +66,16 @@ export function ContactsPage() {
           <option value="customer">Clientes</option>
           <option value="supplier">Proveedores</option>
         </NativeSelect>
+        {canEdit ? (
+          <Button
+            variant="outline"
+            onClick={() => setImporting(true)}
+            aria-label="Importar desde Excel"
+            title="Importar desde Excel"
+          >
+            <UploadIcon /> <span className="sm:hidden xl:inline">Importar</span>
+          </Button>
+        ) : null}
         <Button onClick={() => setEditing(null)}>
           <PlusIcon /> Nuevo
         </Button>
@@ -122,6 +135,9 @@ export function ContactsPage() {
           </TableBody>
         </Table>
       </Card>
+      {importing ? (
+        <ImportDialog config={contactImport} onClose={() => setImporting(false)} />
+      ) : null}
       {editing !== undefined ? (
         <ContactDialog
           key={editing?.id ?? "new"}

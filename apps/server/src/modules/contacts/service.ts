@@ -3,6 +3,7 @@ import { auditLog, contact, type Db } from "@millhiore/db"
 import { uuidv7 } from "@millhiore/domain"
 import { and, asc, eq, inArray, like, or } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
+import { requireActivePriceList } from "../catalog/priceLists"
 
 /** "v12345678" → "V-12345678"; "j123456789" → "J-12345678-9" (formato del RIF). */
 export function normalizeTaxId(raw: string | null | undefined): string | null {
@@ -79,6 +80,7 @@ export function createContact(
 ): Contact {
   const id = uuidv7(now)
   return db.transaction((tx) => {
+    if (input.priceListId) requireActivePriceList(tx, input.priceListId)
     try {
       tx.insert(contact)
         .values({
@@ -92,6 +94,7 @@ export function createContact(
           notes: input.notes || null,
           creditDays: input.creditDays ?? 0,
           creditLimitMinor: input.creditLimitMinor ?? null,
+          priceListId: input.priceListId ?? null,
           createdAt: now,
         })
         .run()
@@ -115,6 +118,7 @@ export function updateContact(
   return db.transaction((tx) => {
     const before = tx.select().from(contact).where(eq(contact.id, id)).get()
     if (!before) throw new HttpError(404, "NOT_FOUND", `No existe el contacto ${id}`)
+    if (patch.priceListId) requireActivePriceList(tx, patch.priceListId)
     const set = {
       ...(patch.kind !== undefined ? { kind: patch.kind } : {}),
       ...(patch.name !== undefined ? { name: patch.name } : {}),
@@ -125,6 +129,7 @@ export function updateContact(
       ...(patch.notes !== undefined ? { notes: patch.notes || null } : {}),
       ...(patch.creditDays !== undefined ? { creditDays: patch.creditDays } : {}),
       ...(patch.creditLimitMinor !== undefined ? { creditLimitMinor: patch.creditLimitMinor } : {}),
+      ...(patch.priceListId !== undefined ? { priceListId: patch.priceListId ?? null } : {}),
       ...(patch.active !== undefined ? { active: patch.active } : {}),
     }
     try {

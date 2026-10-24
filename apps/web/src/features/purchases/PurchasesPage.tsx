@@ -15,15 +15,17 @@ import { PlusIcon } from "lucide-react"
 import { useState } from "react"
 import { formatDateTime, formatMoney } from "../../lib/format"
 import { bootstrapQuery, documentsQuery } from "../../lib/queries"
+import { useTerminal } from "../../lib/terminal"
 import { DocumentDialog } from "../sales/SalesPage"
 import { NewPurchaseDialog } from "./NewPurchaseDialog"
 
 export function PurchasesPage() {
   const { data: boot } = useQuery(bootstrapQuery)
-  const docs = useQuery(documentsQuery({ type: "PURCHASE" }))
+  // Las devoluciones a proveedores salen junto a sus compras.
+  const docs = useQuery(documentsQuery({ type: "PURCHASE,PURCHASE_RETURN" }))
   const [creating, setCreating] = useState(false)
   const [open, setOpen] = useState<DocumentSummary | null>(null)
-  const terminalId = boot?.terminals[0]?.id
+  const terminalId = useTerminal()?.id
 
   return (
     <div className="grid grid-cols-1 gap-4">
@@ -82,13 +84,18 @@ export function PurchasesPage() {
                 </TableCell>
                 <TableCell className="hidden sm:table-cell">{d.externalRef ?? "—"}</TableCell>
                 <TableCell className="tabular text-right">
-                  {formatMoney(d.totalMinor, d.currency)}
+                  {formatMoney(
+                    d.type === "PURCHASE_RETURN" ? -d.totalMinor : d.totalMinor,
+                    d.currency,
+                  )}
                 </TableCell>
                 <TableCell>
                   {d.reversesDocumentId ? (
                     <Badge variant="outline">Reverso</Badge>
                   ) : d.reversedBy ? (
                     <Badge variant="destructive">Anulada</Badge>
+                  ) : d.type === "PURCHASE_RETURN" ? (
+                    <Badge variant="secondary">Devolución</Badge>
                   ) : (
                     <Badge variant="success">Registrada</Badge>
                   )}

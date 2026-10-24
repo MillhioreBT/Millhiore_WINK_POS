@@ -1,13 +1,29 @@
-import type { Me } from "@millhiore/contracts"
+import type { Features, Me } from "@millhiore/contracts"
 import { useQuery } from "@tanstack/react-query"
 import { api } from "./api"
-import { meQuery, queryClient } from "./queries"
+import { bootstrapQuery, meQuery, queryClient } from "./queries"
 
 /** Usuario de la sesión. Dentro de las rutas protegidas siempre existe. */
 export function useMe(): Me {
   const { data } = useQuery(meQuery)
   if (!data) throw new Error("Sin sesión")
   return data
+}
+
+const ALL_FEATURES: Features = {
+  quotes: true,
+  priceLists: true,
+  charges: true,
+  recurring: true,
+  payables: true,
+  locations: false,
+  lots: false,
+}
+
+/** Las funciones que usa el comercio; mientras carga, las de siempre (como antes de poder apagarlas). */
+export function useFeatures(): Features {
+  const { data } = useQuery(bootstrapQuery)
+  return data?.features ?? ALL_FEATURES
 }
 
 export function can(me: Me, ...permissions: string[]): boolean {

@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import type {
+  DaySummary,
   ExpenseCategory,
   InventoryReport,
   PaymentMethodRow,
   PostedDocumentBody,
   ResultsReport,
   SalesReport,
+  TaxBook,
 } from "@millhiore/contracts"
-import { documentTax, role } from "@millhiore/db"
+import { category, documentTax, product, role } from "@millhiore/db"
 import { uuidv7 } from "@millhiore/domain"
 import { eq } from "drizzle-orm"
 import { checkInvariants } from "../../posting/invariants"
@@ -158,6 +160,9 @@ describe("estado de resultados", () => {
       { name: category?.name ?? "", count: 1, totalLegalMinor: 1_000 },
     ])
     expect(r.inventoryLossLegalMinor).toBe(3_650)
+    // La misma merma sale en Inicio, el día en que ocurrió
+    const today = await get<DaySummary>(s.owner, "/api/reports/day")
+    expect(today.inventoryLossLegalMinor).toBe(3_650)
     expect(r.commissionsLegalMinor).toBe(274)
     expect(r.netProfitLegalMinor).toBe(10_950 - tax - 7_300 - 1_000 - 3_650 - 274)
     // La compra no es un gasto: sale aparte, como información
@@ -317,7 +322,20 @@ describe("informe de ventas", () => {
         ],
       }),
     })
+    // El pan pasa a una categoría: el informe la toma de su producto
+    h.db.insert(category).values({ id: "c1", name: "Panadería", position: 1 }).run()
+    h.db.update(product).set({ categoryId: "c1" }).where(eq(product.id, "p1")).run()
     const r = await get<SalesReport>(s.owner, `/api/reports/sales?${WIDE()}`)
+    expect(r.byCategory).toEqual([
+      {
+        categoryId: "c1",
+        name: "Panadería",
+        products: 1,
+        totalLegalMinor: 21_900,
+        costLegalMinor: 14_600,
+        profitLegalMinor: 21_900 - 14_600,
+      },
+    ])
     expect(r.totals).toMatchObject({ count: 2, totalLegalMinor: 21_900, averageLegalMinor: 10_950 })
     expect(r.byDay).toHaveLength(1)
     expect(r.byDay[0]).toMatchObject({ count: 2, totalLegalMinor: 21_900 })
@@ -384,5 +402,48 @@ describe("inventario valorado", () => {
     })
     expect(blind.totalValueLegalMinor).toBeNull()
     expect(blind.totalRetailLegalMinor).toBe(98_550)
+  })
+})
+
+describe("libro de ventas y de compras", () => {
+  test("cada documento con su base e IVA; las anulaciones restan y dicen qué anulan", async () => {
+    const s = await setUp(h)
+    expect((await stockUp(s.owner, s)).status).toBe(201)
+    const sale = (await (
+      await h.call("/api/documents", {
+        cookie: s.owner,
+        body: saleBody(s.terminalId, s.methodUsd),
+      })
+    ).json()) as PostedDocumentBody
+    await h.call(`/api/documents/${sale.id}/void`, {
+      cookie: s.owner,
+      body: { reversalId: uuidv7(), reason: "Prueba" },
+    })
+
+    const sales = await get<TaxBook>(s.owner, `/api/reports/tax-book?kind=sales&${WIDE()}`)
+    expect(sales.rates).toEqual([{ key: "taxed:1600", kind: "taxed", rateBp: 1600 }])
+    expect(sales.rows).toHaveLength(2)
+    const [original, reversal] = sales.rows
+    expect(original).toMatchObject({ number: sale.number, voids: null, totalLegalMinor: 10_950 })
+    expect(reversal).toMatchObject({ voids: sale.number, totalLegalMinor: -10_950 })
+    expect(original?.groups[0]?.taxLegalMinor).toBeGreaterThan(0)
+    expect(reversal?.groups[0]?.taxLegalMinor).toBe(-(original?.groups[0]?.taxLegalMinor ?? 0))
+    expect(sales.totals).toEqual({
+      totalLegalMinor: 0,
+      surchargeLegalMinor: 0,
+      groups: [{ key: "taxed:1600", baseLegalMinor: 0, taxLegalMinor: 0 }],
+    })
+
+    // La compra: 20 × 1,00 $ sin IVA incluido = 730 Bs de base y 116,80 Bs de IVA
+    const purchases = await get<TaxBook>(s.owner, `/api/reports/tax-book?kind=purchases&${WIDE()}`)
+    expect(purchases.rows).toHaveLength(1)
+    expect(purchases.rows[0]).toMatchObject({
+      type: "PURCHASE",
+      totalLegalMinor: 84_680,
+      groups: [{ key: "taxed:1600", baseLegalMinor: 73_000, taxLegalMinor: 11_680 }],
+    })
+
+    const res = await h.call(`/api/reports/tax-book?kind=otro&${WIDE()}`, { cookie: s.owner })
+    expect(res.status).toBe(422)
   })
 })

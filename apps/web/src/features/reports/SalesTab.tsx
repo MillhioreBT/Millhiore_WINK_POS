@@ -12,10 +12,12 @@ import {
   TableRow,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
+import type { ReactNode } from "react"
 import { formatMoney, formatQty } from "../../lib/format"
 import { salesReportQuery } from "../../lib/queries"
-import { bold, downloadXlsx, fileName, moneyCell, qtyCell } from "../../lib/xlsx"
-import { ExportButtons, PrintHeader } from "./parts"
+import { bold, downloadXlsx, fileName, moneyCell, percentCell, qtyCell } from "../../lib/xlsx"
+import { changeBp } from "./compare"
+import { type Comparison, Delta, ExportButtons, PrintHeader } from "./parts"
 
 const day = (date: string) => date.split("-").reverse().join("/")
 
@@ -24,36 +26,90 @@ export function SalesTab({
   bounds,
   period,
   business,
+  compare,
 }: {
   bounds: { from: number; to: number }
   period: string
   business: string
+  compare: Comparison
 }) {
   const { data: r, isLoading } = useQuery(salesReportQuery(bounds))
+  const { data: p } = useQuery(salesReportQuery(compare.bounds))
   if (!r) {
     return <p className="text-muted-foreground text-sm">{isLoading ? "Cargando…" : "Sin datos."}</p>
   }
   const c = r.legalCurrency
   const money = (minor: number | null) => (minor === null ? "—" : formatMoney(minor, c))
   const biggestDay = Math.max(1, ...r.byDay.map((d) => d.totalLegalMinor))
+  const biggestCategory = Math.max(1, ...r.byCategory.map((x) => x.totalLegalMinor))
+  const previous = (current: number, before: number | undefined) =>
+    before === undefined ? [] : [before, percentCell(changeBp(current, before))]
+  const previousMoney = (current: number, before: number | undefined) =>
+    before === undefined ? [] : [moneyCell(before), percentCell(changeBp(current, before))]
 
   const exportXlsx = () =>
     downloadXlsx(fileName("ventas", period), [
       {
         name: "Resumen",
-        widths: [34, 18],
+        widths: [34, 18, 18, 12],
         rows: [
           [bold(`${business} · Ventas`)],
           [`Período: ${period}`],
+          [`Comparado con: ${compare.period} (${compare.label})`],
           [`Moneda: ${c}`],
           [],
-          ["Ventas", r.totals.count],
-          ["Total con IVA", moneyCell(r.totals.totalLegalMinor)],
-          ["IVA", moneyCell(r.totals.taxLegalMinor)],
-          ["Ventas sin IVA", moneyCell(r.totals.netLegalMinor)],
-          ["Promedio por venta", moneyCell(r.totals.averageLegalMinor)],
-          ["Descuentos dados", moneyCell(r.totals.discountLegalMinor)],
-          ["Devoluciones", moneyCell(r.totals.returnsLegalMinor)],
+          ["", bold("Período"), bold("Anterior"), bold("Cambio")],
+          ["Ventas", r.totals.count, ...previous(r.totals.count, p?.totals.count)],
+          [
+            "Total con IVA",
+            moneyCell(r.totals.totalLegalMinor),
+            ...previousMoney(r.totals.totalLegalMinor, p?.totals.totalLegalMinor),
+          ],
+          [
+            "IVA",
+            moneyCell(r.totals.taxLegalMinor),
+            ...previousMoney(r.totals.taxLegalMinor, p?.totals.taxLegalMinor),
+          ],
+          [
+            "Ventas sin IVA",
+            moneyCell(r.totals.netLegalMinor),
+            ...previousMoney(r.totals.netLegalMinor, p?.totals.netLegalMinor),
+          ],
+          [
+            "Promedio por venta",
+            moneyCell(r.totals.averageLegalMinor),
+            ...previousMoney(r.totals.averageLegalMinor, p?.totals.averageLegalMinor),
+          ],
+          [
+            "Descuentos dados",
+            moneyCell(r.totals.discountLegalMinor),
+            ...previousMoney(r.totals.discountLegalMinor, p?.totals.discountLegalMinor),
+          ],
+          [
+            "Devoluciones",
+            moneyCell(r.totals.returnsLegalMinor),
+            ...previousMoney(r.totals.returnsLegalMinor, p?.totals.returnsLegalMinor),
+          ],
+        ],
+      },
+      {
+        name: "Por categoría",
+        widths: [30, 12, 18, 18, 18],
+        rows: [
+          [
+            bold("Categoría"),
+            bold("Productos"),
+            bold(`Vendido (${c})`),
+            bold(`Costo (${c})`),
+            bold(`Utilidad (${c})`),
+          ],
+          ...r.byCategory.map((x) => [
+            x.name,
+            x.products,
+            moneyCell(x.totalLegalMinor),
+            moneyCell(x.costLegalMinor),
+            moneyCell(x.profitLegalMinor),
+          ]),
         ],
       },
       {
@@ -109,21 +165,26 @@ export function SalesTab({
       },
     ])
 
-  const stat = (label: string, value: string, hint?: string) => (
+  const stat = (label: string, value: string, hint?: string, delta?: ReactNode) => (
     <Card>
       <CardHeader className="p-4">
         <CardDescription>{label}</CardDescription>
         <CardTitle className="tabular text-xl">{value}</CardTitle>
+        {delta}
         {hint ? <p className="text-muted-foreground text-xs">{hint}</p> : null}
       </CardHeader>
     </Card>
+  )
+  const delta = (current: number, before: number | undefined, format = money) => (
+    <Delta current={current} previous={before} format={(v) => format(v)} />
   )
 
   return (
     <div className="grid grid-cols-1 gap-4">
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-muted-foreground text-sm print:hidden">
-          Todo en {c}, cada venta a la tasa de su día. Las devoluciones y anulaciones restan.
+          Todo en {c}, cada venta a la tasa de su día. Las devoluciones y anulaciones restan. Las
+          flechas comparan con {compare.label} ({compare.period}).
         </p>
         <div className="ml-auto">
           <ExportButtons onExcel={exportXlsx} />
@@ -132,14 +193,30 @@ export function SalesTab({
       <PrintHeader business={business} title="Ventas" period={period} />
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-        {stat("Ventas", String(r.totals.count))}
+        {stat(
+          "Ventas",
+          String(r.totals.count),
+          undefined,
+          delta(r.totals.count, p?.totals.count, String),
+        )}
         {stat(
           "Total con IVA",
           money(r.totals.totalLegalMinor),
           `IVA ${money(r.totals.taxLegalMinor)}`,
+          delta(r.totals.totalLegalMinor, p?.totals.totalLegalMinor),
         )}
-        {stat("Ventas sin IVA", money(r.totals.netLegalMinor))}
-        {stat("Promedio por venta", money(r.totals.averageLegalMinor))}
+        {stat(
+          "Ventas sin IVA",
+          money(r.totals.netLegalMinor),
+          undefined,
+          delta(r.totals.netLegalMinor, p?.totals.netLegalMinor),
+        )}
+        {stat(
+          "Promedio por venta",
+          money(r.totals.averageLegalMinor),
+          undefined,
+          delta(r.totals.averageLegalMinor, p?.totals.averageLegalMinor),
+        )}
         {stat(
           "Devoluciones",
           money(r.totals.returnsLegalMinor),
@@ -182,6 +259,48 @@ export function SalesTab({
         </Card>
 
         <div className="grid grid-cols-1 content-start gap-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Por categoría</CardTitle>
+              <CardDescription>
+                Lo vendido de cada categoría y, si se ven costos, su utilidad
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {r.byCategory.length ? (
+                <ul className="grid grid-cols-1 gap-2 text-sm">
+                  {r.byCategory.map((x) => (
+                    <li key={x.categoryId ?? ""} className="grid grid-cols-1 gap-1">
+                      <span className="flex justify-between gap-3">
+                        <span className="min-w-0">
+                          {x.name}
+                          <span className="block text-muted-foreground text-xs">
+                            {x.products} producto{x.products === 1 ? "" : "s"}
+                            {x.profitLegalMinor !== null
+                              ? ` · utilidad ${money(x.profitLegalMinor)}`
+                              : ""}
+                          </span>
+                        </span>
+                        <span className="tabular shrink-0 font-medium">
+                          {money(x.totalLegalMinor)}
+                        </span>
+                      </span>
+                      <span className="h-1.5 overflow-hidden rounded-full bg-muted">
+                        <span
+                          className="block h-full rounded-full bg-primary"
+                          style={{
+                            width: `${Math.max(2, (x.totalLegalMinor / biggestCategory) * 100)}%`,
+                          }}
+                        />
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-muted-foreground text-sm">Sin ventas en el período.</p>
+              )}
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader>
               <CardTitle>Cobrado por método</CardTitle>

@@ -18,6 +18,7 @@ import { toast } from "sonner"
 import { api, errorMessage } from "../../lib/api"
 import { formatMoney, parseAmount, toInputAmount } from "../../lib/format"
 import { bootstrapQuery, queryClient, rateStatusQuery, statementQuery } from "../../lib/queries"
+import { deviceTerminal } from "../../lib/terminal"
 import {
   computeCheckout,
   makeContext,
@@ -75,7 +76,14 @@ export function CollectDialog({
   const amount = parseAmount(amountText)
   const amountMinor = amount !== null && balance ? Math.min(amount, balance.outstandingMinor) : 0
   const ticket = useMemo<Ticket>(
-    () => ({ lineTotals: [], discountMinor: 0, taxes: [], totalMinor: amountMinor, taxMinor: 0 }),
+    () => ({
+      lineTotals: [],
+      charges: [],
+      discountMinor: 0,
+      taxes: [],
+      totalMinor: amountMinor,
+      taxMinor: 0,
+    }),
     [amountMinor],
   )
   const checkout = useMemo(
@@ -128,7 +136,7 @@ export function CollectDialog({
             body: {
               id: documentId,
               type: "PAYMENT_IN",
-              terminalId: boot.data?.terminals[0]?.id,
+              terminalId: boot.data ? deviceTerminal(boot.data)?.id : undefined,
               currency,
               rate: ctx.rate,
               contactId,
@@ -281,6 +289,7 @@ function CollectBody({
             {parts.map((p) => (
               <li key={p.sale.id} className="flex justify-between gap-3 px-3 py-2">
                 <span>
+                  {p.sale.kind === "DEBT_IN" ? `${p.sale.label} · ` : ""}
                   {p.sale.number}
                   <span className="text-muted-foreground">
                     {" "}

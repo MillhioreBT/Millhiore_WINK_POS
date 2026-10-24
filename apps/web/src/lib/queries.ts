@@ -6,25 +6,36 @@ import type {
   Category,
   Contact,
   DaySummary,
+  DiscountCode,
   DocumentDetail,
   DocumentSummary,
+  ExchangeExposure,
   ExpenseCategory,
   Expenses,
   FiscalSettingsBody,
   InventoryReport,
+  Lots,
   Me,
+  Onboarding,
   Payables,
   PaymentMethodRow,
+  PriceList,
+  QuoteDetail,
+  QuoteSummary,
   Receivables,
   RecurringExpense,
   ResultsReport,
+  SaleCharge,
   SalesReport,
   SessionRow,
   Shift,
   ShiftReport,
   Statement,
   StockAdjustments,
+  StockLocation,
   StockReason,
+  TaxBook,
+  TerminalInfo,
   TransferRow,
 } from "@millhiore/contracts"
 import { QueryClient, queryOptions } from "@tanstack/react-query"
@@ -292,6 +303,13 @@ export const accountsQuery = (opts: { all?: boolean } = {}) =>
     staleTime: 0,
   })
 
+/** Exposición cambiaria de los saldos en bolívares (se refresca con las cuentas). */
+export const exposureQuery = queryOptions({
+  queryKey: ["accounts", "exposure"],
+  queryFn: () => api<ExchangeExposure>("/api/accounts/exposure"),
+  staleTime: 0,
+})
+
 /** Transferencias entre cuentas desde una fecha, las más recientes primero. */
 export const transfersQuery = (params: { from: number }) =>
   queryOptions({
@@ -349,9 +367,103 @@ export const salesReportQuery = (bounds: { from: number; to: number }) =>
     staleTime: 0,
   })
 
+/** Libro de ventas o de compras de un período, con el IVA de cada documento. */
+export const taxBookQuery = (bounds: { from: number; to: number }, kind: "sales" | "purchases") =>
+  queryOptions({
+    queryKey: ["reports", "tax-book", kind, bounds],
+    queryFn: () => api<TaxBook>(`/api/reports/tax-book?kind=${kind}&${rangeQuery(bounds)}`),
+    staleTime: 0,
+  })
+
 /** Inventario valorado de hoy. */
-export const inventoryReportQuery = queryOptions({
-  queryKey: ["reports", "inventory"],
-  queryFn: () => api<InventoryReport>("/api/reports/inventory"),
+/** Inventario valorado de hoy; con `locationId`, solo lo de esa ubicación. */
+export const inventoryReportQuery = (locationId = "") =>
+  queryOptions({
+    queryKey: ["reports", "inventory", locationId],
+    queryFn: () =>
+      api<InventoryReport>(
+        `/api/reports/inventory${locationId ? `?locationId=${encodeURIComponent(locationId)}` : ""}`,
+      ),
+    staleTime: 0,
+  })
+
+/** Listas de precios, en su orden. `all` incluye las desactivadas. */
+export const priceListsQuery = (opts: { all?: boolean } = {}) =>
+  queryOptions({
+    queryKey: ["price-lists", opts.all ? "all" : "active"],
+    queryFn: () => api<PriceList[]>(`/api/price-lists${opts.all ? "?all=true" : ""}`),
+    staleTime: 60_000,
+  })
+
+/** Recargos de venta (delivery, servicio…), en su orden. `all` incluye los desactivados. */
+export const chargesQuery = (opts: { all?: boolean } = {}) =>
+  queryOptions({
+    queryKey: ["charges", opts.all ? "all" : "active"],
+    queryFn: () => api<SaleCharge[]>(`/api/charges${opts.all ? "?all=true" : ""}`),
+    staleTime: 60_000,
+  })
+
+/** Ubicaciones (tienda, depósito…), la tienda primero. `all` incluye las desactivadas. */
+export const locationsQuery = (opts: { all?: boolean } = {}) =>
+  queryOptions({
+    queryKey: ["locations", opts.all ? "all" : "active"],
+    queryFn: () => api<StockLocation[]>(`/api/locations${opts.all ? "?all=true" : ""}`),
+    staleTime: 30_000,
+  })
+
+/** Cajas con su ubicación y si tienen turno abierto. `all` incluye las desactivadas. */
+export const terminalsQuery = (opts: { all?: boolean } = {}) =>
+  queryOptions({
+    queryKey: ["terminals", opts.all ? "all" : "active"],
+    queryFn: () => api<TerminalInfo[]>(`/api/terminals${opts.all ? "?all=true" : ""}`),
+    staleTime: 30_000,
+  })
+
+/** Lotes con existencia, el que vence primero arriba. */
+export const lotsQuery = (
+  params: { status?: "expiring" | "expired" | "all"; variantId?: string; locationId?: string } = {},
+) =>
+  queryOptions({
+    queryKey: ["lots", params],
+    queryFn: () => {
+      const q = new URLSearchParams({ status: params.status ?? "all" })
+      if (params.variantId) q.set("variantId", params.variantId)
+      if (params.locationId) q.set("locationId", params.locationId)
+      return api<Lots>(`/api/lots?${q}`)
+    },
+    staleTime: 0,
+  })
+
+/** Códigos de descuento, también los desactivados, con sus usos. */
+export const discountCodesQuery = queryOptions({
+  queryKey: ["discount-codes"],
+  queryFn: () => api<DiscountCode[]>("/api/discount-codes?all=true"),
+  staleTime: 0,
+})
+
+/** Cotizaciones, las más recientes primero. */
+export const quotesQuery = (params: { status: string; search: string }) =>
+  queryOptions({
+    queryKey: ["quotes", params],
+    queryFn: () => {
+      const q = new URLSearchParams({ limit: "300" })
+      if (params.status) q.set("status", params.status)
+      if (params.search.trim()) q.set("search", params.search.trim())
+      return api<QuoteSummary[]>(`/api/quotes?${q}`)
+    },
+    staleTime: 0,
+  })
+
+export const quoteQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["quotes", "detail", id],
+    queryFn: () => api<QuoteDetail>(`/api/quotes/${id}`),
+    staleTime: 0,
+  })
+
+/** Guía para arrancar: los primeros pasos del comercio y cuáles faltan. */
+export const onboardingQuery = queryOptions({
+  queryKey: ["onboarding"],
+  queryFn: () => api<Onboarding>("/api/onboarding"),
   staleTime: 0,
 })

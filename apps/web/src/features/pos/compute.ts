@@ -1,18 +1,25 @@
-import type { Bootstrap, PaymentMethodInfo } from "@millhiore/contracts"
+import type { Bootstrap, PaymentMethodInfo, SaleChargeInfo } from "@millhiore/contracts"
 import {
   type CurrencyBook,
   computeSurcharges,
   computeTaxes,
+  type DraftCharge,
   type ExchangeRate,
   exchangeRate,
   inDocumentCurrency,
   type LineTax,
   lineTotal,
   type PaymentSurcharge,
+  type PlannedCharge,
+  type Price,
+  type PriceListRule,
+  planCharges,
+  priceInList,
   roundToInteger,
   type SurchargeGroup,
   settle,
   type TaxGroup,
+  taxEntries,
 } from "@millhiore/domain"
 import Big from "big.js"
 
@@ -33,6 +40,10 @@ export interface PosContext {
   methods: readonly PaymentMethodInfo[]
   /** El negocio vende a crédito (fiado). */
   creditEnabled: boolean
+  /** Listas de precios activas, por id, en su orden. */
+  priceLists: ReadonlyMap<string, PriceListRule & { id: string; name: string }>
+  /** Recargos de venta activos (delivery, servicio…), por id, en su orden. */
+  charges: ReadonlyMap<string, SaleChargeInfo>
 }
 
 export function makeContext(b: Bootstrap, rateValue: string | null): PosContext {
@@ -46,7 +57,33 @@ export function makeContext(b: Bootstrap, rateValue: string | null): PosContext 
     taxes: new Map(b.taxes.map((t) => [t.id, t])),
     methods: b.paymentMethods,
     creditEnabled: b.credit.enabled,
+    charges: new Map(b.features.charges ? b.charges.map((c) => [c.id, c]) : []),
+    priceLists: new Map(
+      (b.features.priceLists ? b.priceLists : []).map((l) => [
+        l.id,
+        {
+          id: l.id,
+          name: l.name,
+          adjustBp: l.adjustBp,
+          prices: new Map(l.prices.map((p) => [p.variantId, p])),
+        },
+      ]),
+    ),
   }
+}
+
+/** Precio de un producto con la lista elegida (o el normal, sin lista o si ya no existe). */
+export function priceWithList(
+  ctx: PosContext,
+  priceListId: string | null,
+  variantId: string,
+  base: Price,
+): Price {
+  return priceInList(
+    variantId,
+    base,
+    priceListId ? (ctx.priceLists.get(priceListId) ?? null) : null,
+  )
 }
 
 /** Convierte un monto exacto entre la moneda del documento y otra, sin redondear. */
@@ -95,8 +132,14 @@ export function lineTaxOf(ctx: PosContext, taxId: string | null): LineTax | null
  * se escribió (Bs o $). Se convierte a la moneda del documento al calcular.
  */
 export type DiscountSpec =
-  | { kind: "percent"; bp: number }
-  | { kind: "amount"; amountMinor: number; currency: string }
+  | { kind: "percent"; bp: number; code?: DiscountCodeRef | undefined }
+  | { kind: "amount"; amountMinor: number; currency: string; code?: DiscountCodeRef | undefined }
+
+/** El código de descuento del que sale el descuento de la venta (lo aplica cualquier cajero). */
+export interface DiscountCodeRef {
+  id: string
+  code: string
+}
 
 export interface CartLine {
   variantId: string
@@ -113,6 +156,8 @@ export interface CartLine {
 export interface Ticket {
   /** Total de cada línea ya con su descuento. */
   lineTotals: number[]
+  /** Recargos de la venta (delivery, servicio…), ya calculados; suman al total. */
+  charges: PlannedCharge[]
   /** Σ descuentos de las líneas (los de línea y la parte del descuento a toda la venta). */
   discountMinor: number
   taxes: TaxGroup[]
@@ -123,17 +168,39 @@ export interface Ticket {
 
 const identity = (n: number) => n
 
-export function computeTicket(ctx: PosContext, lines: readonly CartLine[]): Ticket {
+export function computeTicket(
+  ctx: PosContext,
+  lines: readonly CartLine[],
+  charges: readonly DraftCharge[] = [],
+): Ticket {
   const lineTotals = lines.map(
     (l) => lineTotal(l.qtyMilli, l.unitPriceMinor) - (l.discountMinor ?? 0),
   )
-  const taxes = computeTaxes(
-    lines.map((l, i) => ({ lineTotalMinor: lineTotals[i] ?? 0, tax: lineTaxOf(ctx, l.taxId) })),
-    ctx.fiscal.pricesIncludeTax,
-    identity,
-  )
+  const entries = lines.map((l, i) => ({
+    lineTotalMinor: lineTotals[i] ?? 0,
+    tax: lineTaxOf(ctx, l.taxId),
+  }))
+  const pricesIncludeTax = ctx.fiscal.pricesIncludeTax
+  const lineTaxes = computeTaxes(entries, pricesIncludeTax, identity)
+  // Los recargos se calculan igual que en el servidor: el porcentaje sobre el subtotal sin IVA.
+  const planned = lines.length ? planCharges(charges, lineTaxes, pricesIncludeTax, identity) : []
+  const chargeTax = new Map(charges.map((c) => [c.chargeId, c.tax]))
+  const taxes = planned.length
+    ? computeTaxes(
+        taxEntries(
+          entries,
+          planned.map((c) => ({
+            amountMinor: c.amountMinor,
+            tax: chargeTax.get(c.chargeId) ?? null,
+          })),
+        ),
+        pricesIncludeTax,
+        identity,
+      )
+    : lineTaxes
   return {
     lineTotals,
+    charges: planned,
     discountMinor: lines.reduce((acc, l) => acc + (l.discountMinor ?? 0), 0),
     taxes,
     totalMinor: taxes.reduce((acc, t) => acc + t.baseMinor + t.taxMinor, 0),
@@ -325,6 +392,59 @@ export function discountOf(ctx: PosContext, spec: DiscountSpec, baseMinor: numbe
   return Math.max(0, Math.min(baseMinor, raw))
 }
 
+/** Recargo elegido en la venta; uno fijo puede llevar el monto escrito para esta venta. */
+export interface TicketCharge {
+  chargeId: string
+  amount?: { amountMinor: number; currency: string } | undefined
+}
+
+/** Los recargos que se agregan solos a cada venta (p. ej. el servicio de un restaurante). */
+export function autoCharges(ctx: PosContext): TicketCharge[] {
+  return [...ctx.charges.values()].filter((c) => c.auto).map((c) => ({ chargeId: c.id }))
+}
+
+/** IVA de un recargo: el suyo, salvo que el negocio no cobre IVA; null = no lleva. */
+function chargeTaxOf(ctx: PosContext, taxId: string | null): LineTax | null {
+  if (!taxId || ctx.fiscal.taxpayer === "none") return null
+  const t = ctx.taxes.get(taxId)
+  return t ? { taxId: t.id, kind: t.kind, rateBp: t.rateBp } : null
+}
+
+/**
+ * Los recargos elegidos, listos para calcular: el monto de uno fijo en la moneda del documento (el
+ * escrito o el sugerido). `missingRate` si alguno está en divisas y no hay tasa.
+ */
+export function draftCharges(
+  ctx: PosContext,
+  chosen: readonly TicketCharge[],
+): { charges: DraftCharge[]; missingRate: boolean } {
+  let missingRate = false
+  const charges: DraftCharge[] = []
+  for (const tc of chosen) {
+    const info = ctx.charges.get(tc.chargeId)
+    if (!info) continue
+    let amountMinor = 0
+    if (info.kind === "fixed") {
+      const amount = tc.amount ?? {
+        amountMinor: info.amountMinor,
+        currency: info.currency ?? ctx.docCurrency,
+      }
+      const inDoc = convertMinor(ctx, amount.amountMinor, amount.currency, ctx.docCurrency)
+      if (inDoc === null) missingRate = true
+      amountMinor = inDoc ?? 0
+    }
+    charges.push({
+      chargeId: info.id,
+      name: info.name,
+      kind: info.kind,
+      rateBp: info.rateBp,
+      amountMinor,
+      tax: chargeTaxOf(ctx, info.taxId),
+    })
+  }
+  return { charges, missingRate }
+}
+
 /** Línea del ticket tal como se guarda en la caja: precio de catálogo y descuento elegido. */
 export interface StoredLine {
   variantId: string
@@ -334,10 +454,13 @@ export interface StoredLine {
   priceCurrency: string
   taxId: string | null
   discount?: DiscountSpec | undefined
+  /** Precio congelado (de una cotización): no le aplica la lista de precios. */
+  fixedPrice?: boolean | undefined
 }
 
 /**
- * El ticket de la caja: precios en la moneda del documento y los descuentos ya calculados. El de
+ * El ticket de la caja: precios en la moneda del documento (con la lista de precios elegida, si
+ * hay) y los descuentos ya calculados. El de
  * cada línea se resta de su importe; el de toda la venta se reparte entre las líneas en proporción
  * a lo que vale cada una (el servidor solo conoce descuentos por línea, y así el IVA de cada
  * línea se calcula sobre lo que de verdad se cobra). Lo que sobra por redondeo va a la mayor.
@@ -346,10 +469,14 @@ export function buildCart(
   ctx: PosContext,
   stored: readonly StoredLine[],
   saleDiscount: DiscountSpec | null,
+  priceListId: string | null = null,
+  chosenCharges: readonly TicketCharge[] = [],
 ): { lines: CartLine[]; ticket: Ticket; missingRate: boolean } {
-  let missingRate = false
+  const charges = draftCharges(ctx, chosenCharges)
+  let missingRate = charges.missingRate
   const base = stored.map((l) => {
-    const unit = unitPriceInDoc(ctx, l.priceMinor, l.priceCurrency)
+    const price = l.fixedPrice ? l : priceWithList(ctx, priceListId, l.variantId, l)
+    const unit = unitPriceInDoc(ctx, price.priceMinor, price.priceCurrency)
     if (unit === null) missingRate = true
     const unitPriceMinor = unit ?? 0
     const gross = lineTotal(l.qtyMilli, unitPriceMinor)
@@ -376,5 +503,5 @@ export function buildCart(
     discountMinor: b.own + (shares[i] ?? 0),
     taxId: b.l.taxId,
   }))
-  return { lines, ticket: computeTicket(ctx, lines), missingRate }
+  return { lines, ticket: computeTicket(ctx, lines, charges.charges), missingRate }
 }

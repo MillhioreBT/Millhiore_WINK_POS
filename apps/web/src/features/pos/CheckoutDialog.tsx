@@ -30,6 +30,7 @@ import {
   type Ticket,
 } from "./compute"
 import { PaymentPanel, useChange } from "./PaymentPanel"
+import { usePos } from "./store"
 
 const DAY_MS = 86_400_000
 
@@ -53,8 +54,18 @@ export function CheckoutDialog({
   const me = useMe()
   const [payments, setPayments] = useState<PaymentEntry[]>([])
   const [busy, setBusy] = useState(false)
-  const [customer, setCustomer] = useState<Contact | null>(null)
+  const quote = usePos((s) => s.quote)
+  const discountCode = usePos((s) => s.saleDiscount?.code)
+  // Una venta que sale de una cotización viene con su cliente.
+  const [customer, setCustomer] = useState<Contact | null>(quote?.contact ?? null)
   const [onCredit, setOnCredit] = useState(false)
+  const { priceListId, setPriceList } = usePos()
+  /** Lista del cliente elegido, si no es la que ya tiene la venta. */
+  const customerList =
+    customer?.priceListId && customer.priceListId !== priceListId
+      ? ctx.priceLists.get(customer.priceListId)
+      : undefined
+  const currentList = priceListId ? ctx.priceLists.get(priceListId) : undefined
 
   const doc = ctx.docCurrency
   const ref = ctx.refCurrency
@@ -92,6 +103,10 @@ export function CheckoutDialog({
   const pickCustomer = (c: Contact | null) => {
     setCustomer(c)
     if (!c) setOnCredit(false)
+    // Un cliente con lista de precios compra con ella; si ya se anotaron pagos, se ofrece.
+    if (c?.priceListId && ctx.priceLists.has(c.priceListId) && payments.length === 0) {
+      setPriceList(c.priceListId)
+    }
   }
 
   const confirm = async () => {
@@ -128,12 +143,19 @@ export function CheckoutDialog({
           rate: ctx.rate,
           pricesIncludeTax: ctx.fiscal.pricesIncludeTax,
           contactId: customer?.id ?? null,
+          ...(quote ? { quoteId: quote.id } : {}),
+          ...(discountCode ? { discountCodeId: discountCode.id } : {}),
           ...(credit ? { creditMinor: credit.amountMinor, creditCurrency: credit.currency } : {}),
           lines: lines.map((l) => ({
             variantId: l.variantId,
             qtyMilli: l.qtyMilli,
             unitPriceMinor: l.unitPriceMinor,
             discountMinor: l.discountMinor ?? 0,
+          })),
+          // Recargos (delivery, servicio): el fijo con el monto que se ve; el % lo calcula el servidor.
+          charges: ticket.charges.map((c) => ({
+            chargeId: c.chargeId,
+            ...(c.kind === "fixed" ? { amountMinor: c.amountMinor } : {}),
           })),
           payments: final.map((p) => ({
             id: p.id,
@@ -149,6 +171,7 @@ export function CheckoutDialog({
         queryClient.invalidateQueries({ queryKey: ["products"] }),
         queryClient.invalidateQueries({ queryKey: ["documents"] }),
         queryClient.invalidateQueries({ queryKey: ["receivables"] }),
+        ...(quote ? [queryClient.invalidateQueries({ queryKey: ["quotes"] })] : []),
       ])
       toast.success(`Venta ${posted.number} registrada${credit ? " a crédito" : ""}`)
       onPosted(posted.id)
@@ -204,6 +227,19 @@ export function CheckoutDialog({
           onChange={pickCustomer}
           placeholder="Cliente (opcional): nombre, cédula o teléfono"
         />
+        {customerList ? (
+          <Button
+            variant="outline"
+            onClick={() => {
+              setPayments([])
+              setPriceList(customerList.id)
+            }}
+          >
+            Usar los precios «{customerList.name}» de este cliente
+          </Button>
+        ) : currentList ? (
+          <p className="text-muted-foreground text-sm">Con los precios «{currentList.name}».</p>
+        ) : null}
 
         <PaymentPanel
           ctx={ctx}

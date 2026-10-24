@@ -21,6 +21,9 @@ export type Reader = Pick<Db, "select">
 export interface OpenSale {
   id: string
   number: string
+  type: DocumentType
+  /** Lo que se anotó en el documento (en una deuda manual, qué es). */
+  note: string | null
   contactId: string
   currency: string
   postedAt: number
@@ -48,6 +51,8 @@ export function openCredits(
     .select({
       id: document.id,
       number: document.number,
+      type: document.type,
+      note: document.note,
       contactId: document.contactId,
       currency: document.creditCurrency,
       postedAt: document.postedAt,
@@ -78,6 +83,8 @@ export function openCredits(
             {
               id: r.id,
               number: r.number,
+              type: r.type,
+              note: r.note,
               contactId: r.contactId,
               currency: r.currency,
               postedAt: r.postedAt,
@@ -95,20 +102,20 @@ export function openCredits(
     )
 }
 
-/** Ventas a crédito con saldo pendiente: lo que los clientes todavía deben. */
+/** Ventas a crédito y deudas manuales con saldo pendiente: lo que los clientes todavía deben. */
 export function openSales(
   db: Reader,
   filter: { contactId?: string; ids?: readonly string[] } = {},
 ): OpenSale[] {
-  return openCredits(db, { ...filter, types: ["SALE"] })
+  return openCredits(db, { ...filter, types: ["SALE", "DEBT_IN"] })
 }
 
-/** Compras y gastos a deber con saldo pendiente: lo que el negocio todavía le debe a sus proveedores. */
+/** Compras, gastos y deudas a deber con saldo pendiente: lo que el negocio le debe a sus proveedores. */
 export function openPayables(
   db: Reader,
   filter: { contactId?: string; ids?: readonly string[] } = {},
 ): OpenSale[] {
-  return openCredits(db, { ...filter, types: ["PURCHASE", "EXPENSE"] })
+  return openCredits(db, { ...filter, types: ["PURCHASE", "EXPENSE", "DEBT_OUT"] })
 }
 
 /** Abonos netos (los anulados restan) que tiene aplicados una venta. */
