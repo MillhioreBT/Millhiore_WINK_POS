@@ -9,6 +9,7 @@ import {
   CardHeader,
   CardTitle,
   cn,
+  NativeSelect,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
@@ -23,6 +24,7 @@ import {
   TrendingUpIcon,
 } from "lucide-react"
 import { useState } from "react"
+import { useBranchChoices } from "../../lib/branches"
 import { formatDay, formatMoney, formatPercent, formatQty, formatTime } from "../../lib/format"
 import {
   bootstrapQuery,
@@ -243,7 +245,10 @@ export function DashboardPage() {
   const features = useFeatures()
   const [date, setDate] = useState<string | undefined>(undefined)
   const [closing, setClosing] = useState(false)
-  const summary = useQuery(daySummaryQuery(date))
+  // Con sucursales: todas (las de quien consulta) o una.
+  const branches = useBranchChoices()
+  const [branchId, setBranchId] = useState("")
+  const summary = useQuery(daySummaryQuery(date, branchId || undefined))
   // Gastos recurrentes que vencieron y esperan que alguien los registre.
   const recurring = useQuery({
     ...recurringQuery,
@@ -293,12 +298,33 @@ export function DashboardPage() {
             Hoy
           </Button>
         )}
+        {branches ? (
+          <NativeSelect
+            aria-label="Sucursal"
+            value={branchId}
+            onChange={(e) => setBranchId(e.target.value)}
+            className="h-8 w-auto py-1"
+          >
+            <option value="">Todas las sucursales</option>
+            {branches.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}
+              </option>
+            ))}
+          </NativeSelect>
+        ) : null}
         <Button variant="outline" size="sm" disabled={!s} onClick={() => setClosing(true)}>
           <MessageCircleIcon /> <span className="hidden sm:inline">Cierre del día</span>
           <span className="sm:hidden">Cierre</span>
         </Button>
       </div>
-      {closing && s ? <ClosingDialog summary={s} onClose={() => setClosing(false)} /> : null}
+      {closing && s ? (
+        <ClosingDialog
+          summary={s}
+          branchName={branches?.find((b) => b.id === branchId)?.name}
+          onClose={() => setClosing(false)}
+        />
+      ) : null}
 
       {!s ? (
         <p className="py-10 text-center text-muted-foreground">

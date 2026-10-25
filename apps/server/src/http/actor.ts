@@ -3,6 +3,7 @@ import { isPermission, type Permission } from "@millhiore/domain"
 import { eq } from "drizzle-orm"
 import type { Context } from "hono"
 import type { Auth } from "../infra/auth"
+import { type BranchScope, branchScope } from "../modules/branches/service"
 import { forbidden, unauthorized } from "./errors"
 
 export interface Actor {
@@ -15,6 +16,15 @@ export interface Actor {
   sessionId: string
   mustChangePassword: boolean
   hasPin: boolean
+  /** Llegó con una clave de la API (`Authorization: Bearer mwk_…`), no con una sesión. */
+  apiKeyId?: string | undefined
+  /**
+   * Llega de un plugin: de su código (con su clave interna) o de su pantalla (con la sesión de
+   * quien la usa). Puede lo que el plugin pide y la persona tiene, nunca más.
+   */
+  pluginId?: string | undefined
+  /** Sucursales donde trabaja; null, en todas (o las sucursales están apagadas). */
+  branchIds: BranchScope
 }
 
 export type AppEnv = { Variables: { actor: Actor } }
@@ -35,6 +45,7 @@ export async function resolveActor(auth: Auth, db: Db, headers: Headers): Promis
     sessionId: session.session.id,
     mustChangePassword: row.mustChangePassword,
     hasPin: row.pinHash !== null,
+    branchIds: branchScope(db, row.id),
   }
 }
 

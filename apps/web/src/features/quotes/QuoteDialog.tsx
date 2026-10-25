@@ -1,3 +1,4 @@
+import { whatsappNumber } from "@millhiore/domain"
 import {
   Button,
   Dialog,
@@ -24,7 +25,6 @@ import { bootstrapQuery, queryClient, quoteQuery, rateStatusQuery } from "../../
 import { can, useMe } from "../../lib/session"
 import { buildCart, convertMinor, makeContext } from "../pos/compute"
 import { usePos } from "../pos/store"
-import { whatsappNumber } from "../receivables/StatementDialog"
 import { BusinessHeader } from "../sales/ReceiptDialog"
 import { isExpired, QUOTE_STATUS, quoteCharges, quoteLines } from "./quoteTicket"
 

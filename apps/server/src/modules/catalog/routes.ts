@@ -6,15 +6,19 @@ import {
   type CatalogItem,
   catalogItemSchema,
   createProductSchema,
+  productDetailSchema,
   updateProductSchema,
 } from "@millhiore/contracts"
 import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { forbidden } from "../../http/errors"
+import { locationsIn } from "../branches/service"
 import { registerCategoryRoutes } from "./categories"
+import { registerProductImageRoutes } from "./images"
+import { registerModifierRoutes } from "./modifiers"
 import { registerPriceListRoutes } from "./priceLists"
 import { bulkReprice } from "./pricing"
-import { createProduct, listItems, updateProduct } from "./service"
+import { createProduct, listItems, productDetail, updateProduct } from "./service"
 
 const err = { content: { "application/json": { schema: apiErrorSchema } } }
 const json = <T extends z.ZodType>(schema: T) => ({ "application/json": { schema } })
@@ -34,11 +38,23 @@ const listRoute = createRoute({
   responses: { 200: { description: "Productos", content: json(z.array(catalogItemSchema)) } },
 })
 
+const detailRoute = createRoute({
+  method: "get",
+  path: "/api/products/{id}",
+  tags: ["Catálogo"],
+  summary: "Un producto con todas sus variantes (tallas, colores…), también las desactivadas",
+  request: { params: z.object({ id: z.string().min(1) }) },
+  responses: {
+    200: { description: "Producto", content: json(productDetailSchema) },
+    404: { description: "No existe", ...err },
+  },
+})
+
 const createRouteDef = createRoute({
   method: "post",
   path: "/api/products",
   tags: ["Catálogo"],
-  summary: "Crea un producto (con su variante de venta)",
+  summary: "Crea un producto: una variante, o una por cada combinación de tallas, colores…",
   request: { body: { content: json(createProductSchema), required: true } },
   responses: {
     201: { description: "Creado", content: json(catalogItemSchema) },
@@ -83,6 +99,20 @@ const bulkPriceRoute = createRoute({
   },
 })
 
+/** Quien trabaja en algunas sucursales ve la existencia de sus ubicaciones, no la de las demás. */
+function onlyAt<T extends CatalogItem>(item: T, here: ReadonlySet<string> | null): T {
+  if (!here) return item
+  const keep = (byLocation: Record<string, number>) =>
+    Object.fromEntries(Object.entries(byLocation).filter(([id]) => here.has(id)))
+  return {
+    ...item,
+    stockByLocation: keep(item.stockByLocation),
+    expiry: item.expiry
+      ? { ...item.expiry, expiredByLocation: keep(item.expiry.expiredByLocation) }
+      : item.expiry,
+  }
+}
+
 /** El costo solo lo ve quien tiene cost.view (el cajero no debe ver el margen). */
 function withCost<T extends CatalogItem>(item: T, permissions: ReadonlySet<string>): T {
   return permissions.has("cost.view") ? item : { ...item, costMinor: null, costCurrency: null }
@@ -91,6 +121,8 @@ function withCost<T extends CatalogItem>(item: T, permissions: ReadonlySet<strin
 export function registerCatalogRoutes(app: App, deps: AppDeps): void {
   registerCategoryRoutes(app, deps)
   registerPriceListRoutes(app, deps)
+  registerModifierRoutes(app, deps)
+  registerProductImageRoutes(app, deps)
 
   app.openapi(listRoute, (c) => {
     const actor = actorOf(c)
@@ -100,8 +132,27 @@ export function registerCatalogRoutes(app: App, deps: AppDeps): void {
       includeInactive: q.all === "true",
       now: deps.now(),
     })
+    const here = locationsIn(deps.db, actor.branchIds)
     return c.json(
-      items.map((i) => withCost(i, actor.permissions)),
+      items.map((i) => withCost(onlyAt(i, here), actor.permissions)),
+      200,
+    )
+  })
+
+  app.openapi(detailRoute, (c) => {
+    const actor = actorOf(c)
+    const detail = productDetail(deps.db, c.req.valid("param").id, deps.now())
+    const costs = actor.permissions.has("cost.view")
+    return c.json(
+      {
+        ...detail,
+        variants: detail.variants.map((v) =>
+          withCost(onlyAt(v, locationsIn(deps.db, actor.branchIds)), actor.permissions),
+        ),
+        recipe: costs
+          ? detail.recipe
+          : detail.recipe.map((r) => ({ ...r, costMinor: null, costCurrency: null })),
+      },
       200,
     )
   })

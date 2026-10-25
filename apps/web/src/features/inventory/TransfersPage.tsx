@@ -17,6 +17,7 @@ import {
 import { useQuery } from "@tanstack/react-query"
 import { ArrowRightIcon, PlusIcon } from "lucide-react"
 import { useState } from "react"
+import { useMyBranchIds } from "../../lib/branches"
 import { dayRange, todayInCaracas } from "../../lib/days"
 import { formatDateTime } from "../../lib/format"
 import { useLocations } from "../../lib/locations"
@@ -31,7 +32,10 @@ import { PRESETS, presetRange } from "./period"
 export function TransfersPage() {
   const me = useMe()
   const boot = useQuery(bootstrapQuery)
-  const locations = useLocations()
+  // Se puede mandar a cualquier sucursal, pero solo desde las propias.
+  const locations = useLocations({ anyBranch: true })
+  const mine = useMyBranchIds()
+  const origins = locations?.filter((l) => !mine || mine.has(l.branchId)) ?? []
   const terminal = useTerminal()
   const today = todayInCaracas()
   const [range, setRange] = useState(() => presetRange("month", today))
@@ -51,7 +55,7 @@ export function TransfersPage() {
     const r = presetRange(p.id, today)
     return r.from === range.from && r.to === range.to
   })
-  const canMove = can(me, "inventory.adjust") && locations !== null
+  const canMove = can(me, "inventory.adjust") && locations !== null && origins.length > 0
 
   return (
     <div className="grid grid-cols-1 gap-4">
@@ -184,10 +188,11 @@ export function TransfersPage() {
         <NewTransferDialog
           boot={boot.data}
           locations={locations}
+          origins={origins}
           terminalId={terminal.id}
           defaultFrom={
             // Lo usual es reponer la tienda desde el depósito.
-            locations.find((l) => l.kind === "warehouse")?.id ?? terminal.locationId
+            origins.find((l) => l.kind === "warehouse")?.id ?? terminal.locationId
           }
           onClose={() => setCreating(false)}
         />

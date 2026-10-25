@@ -1,5 +1,6 @@
 import type {
   CreateStockReasonBody,
+  ProductionRow,
   StockAdjustmentRow,
   StockAdjustments,
   StockReason,
@@ -12,6 +13,7 @@ import {
   type Db,
   document,
   documentLine,
+  location,
   stockReason,
   user,
   variant,
@@ -20,7 +22,51 @@ import { convert, exchangeRate, money, uuidv7 } from "@millhiore/domain"
 import { and, asc, desc, eq, gte, lt, sql } from "drizzle-orm"
 import { alias } from "drizzle-orm/sqlite-core"
 import { HttpError } from "../../http/errors"
+import { inBranches } from "../branches/service"
 import { rateAt } from "../rates/service"
+
+// Producción por tandas
+
+/** Lo producido en un período, la más reciente primero (con sus anulaciones). */
+export function listProduction(
+  db: Db,
+  opts: { from?: number | undefined; to?: number | undefined; seeCost: boolean },
+): ProductionRow[] {
+  const reversal = alias(document, "reversal")
+  return db
+    .select({
+      id: document.id,
+      number: document.number,
+      postedAt: document.postedAt,
+      variantId: documentLine.variantId,
+      productName: variant.name,
+      qtyMilli: documentLine.qtyMilli,
+      unitCostMinor: documentLine.costMinor,
+      costCurrency: documentLine.costCurrency,
+      locationId: document.locationId,
+      locationName: location.name,
+      note: document.note,
+      createdBy: user.name,
+      reversedBy: reversal.id,
+      reversesDocumentId: document.reversesDocumentId,
+    })
+    .from(document)
+    .innerJoin(documentLine, eq(documentLine.documentId, document.id))
+    .innerJoin(variant, eq(variant.id, documentLine.variantId))
+    .innerJoin(location, eq(location.id, document.locationId))
+    .leftJoin(reversal, eq(reversal.reversesDocumentId, document.id))
+    .leftJoin(user, eq(user.id, document.createdBy))
+    .where(
+      and(
+        eq(document.type, "PRODUCTION"),
+        opts.from === undefined ? undefined : gte(document.postedAt, opts.from),
+        opts.to === undefined ? undefined : lt(document.postedAt, opts.to),
+      ),
+    )
+    .orderBy(desc(document.postedAt), desc(document.id), asc(documentLine.lineNo))
+    .all()
+    .map((r) => (opts.seeCost ? r : { ...r, unitCostMinor: null, costCurrency: null }))
+}
 
 // Motivos
 
@@ -135,6 +181,8 @@ export function listAdjustments(
     limit: number
     /** Quien consulta puede ver costos; si no, los valores van vacíos. */
     seeCost: boolean
+    /** Solo los de estas sucursales; null, todas. */
+    branchIds?: readonly string[] | null | undefined
   },
 ): StockAdjustments {
   const biz = db.select().from(business).get()
@@ -179,6 +227,7 @@ export function listAdjustments(
         opts.from === undefined ? undefined : gte(document.postedAt, opts.from),
         opts.to === undefined ? undefined : lt(document.postedAt, opts.to),
         opts.reasonId ? eq(document.stockReasonId, opts.reasonId) : undefined,
+        inBranches(document.locationId, opts.branchIds ?? null),
       ),
     )
     .orderBy(desc(document.postedAt), desc(document.id), asc(documentLine.lineNo))

@@ -17,7 +17,12 @@ export function TerminalPicker({
 }) {
   if (boot.terminals.length < 2) return null
   const current = deviceTerminal(boot)
-  const locationName = (locationId: string) => boot.locations.find((l) => l.id === locationId)?.name
+  // Con sucursales, de cuál es cada caja; si no, de qué ubicación vende.
+  const branches = boot.features.branches && boot.branches.length > 1
+  const whereOf = (t: Bootstrap["terminals"][number]) =>
+    branches
+      ? boot.branches.find((b) => b.id === t.branchId)?.name
+      : boot.locations.find((l) => l.id === t.locationId)?.name
   return (
     <NativeSelect
       id={id}
@@ -27,7 +32,7 @@ export function TerminalPicker({
       className={cn("w-auto", className)}
     >
       {boot.terminals.map((t) => {
-        const where = locationName(t.locationId)
+        const where = whereOf(t)
         return (
           <option key={t.id} value={t.id}>
             {t.name}

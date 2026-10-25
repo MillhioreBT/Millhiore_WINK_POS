@@ -55,17 +55,67 @@ const OPTIONS: { key: keyof Toggles; label: string; hint: string }[] = [
     hint: "Depósito, otra tienda o un segundo mostrador: existencia en cada sitio, traslados y una caja con su propio turno en cada mostrador.",
   },
   {
+    key: "branches",
+    label: "Sucursales",
+    hint: "Otro local contra este mismo servidor: cada sucursal con sus ubicaciones, sus cajas, su lista de precios y sus datos en el recibo; el personal trabaja en las suyas y los informes se ven por sucursal.",
+  },
+  {
     key: "lots",
     label: "Lotes con vencimiento",
     hint: "Para perecederos: cada compra anota su fecha de vencimiento, la caja vende primero lo que vence antes y se avisa de lo que va a vencer.",
   },
+  {
+    key: "variants",
+    label: "Tallas y colores",
+    hint: "Para ropa, calzado o accesorios: cada combinación (M azul, L negra) con su código, su precio y su existencia; en la caja se elige en una cuadrícula.",
+  },
+  {
+    key: "tables",
+    label: "Mesas y cuentas abiertas",
+    hint: "Para restaurantes: salas y mesas, cada una con su cuenta abierta mientras consumen. Se pasa de mesa, se junta y se cobra toda, por partes o a partes iguales.",
+  },
+  {
+    key: "modifiers",
+    label: "Opciones y extras",
+    hint: "Lo que se elige al vender un producto: el término de la carne, el tamaño, queso extra con su precio o «sin cebolla» para la cocina.",
+  },
+  {
+    key: "kitchen",
+    label: "Comandas a cocina",
+    hint: "Lo que se pide va a la cocina o a la barra: a su impresora o a una pantalla de cocina donde se marca lo que está listo.",
+  },
+  {
+    key: "recipes",
+    label: "Recetas e insumos",
+    hint: "Cada plato con sus ingredientes y su merma: al venderlo se descuentan del inventario y se sabe cuánto cuesta.",
+  },
+  {
+    key: "tips",
+    label: "Propinas",
+    hint: "Al cobrar se anota la propina y para quién es; el cierre del turno y los informes dicen cuánto le toca a cada mesonero.",
+  },
+  {
+    key: "scale",
+    label: "Balanza",
+    hint: "Para charcutería, carnicería o frutería: la caja lee las etiquetas con el peso o el precio que imprime la balanza, o pesa directo en una balanza conectada a la PC.",
+  },
+  {
+    key: "catalog",
+    label: "Catálogo en línea",
+    hint: "Una página con tus productos, sus fotos y sus precios en $ y Bs para compartir por WhatsApp o Instagram. Se arma en Ajustes → Integraciones.",
+  },
 ]
 
 /**
- * Lo que suele usar cada tipo de negocio; después se ajusta casilla por casilla. Las ubicaciones
- * dependen del local y los lotes de lo que se vende, no del tipo de negocio: ningún perfil los toca.
+ * Lo que suele usar cada tipo de negocio; después se ajusta casilla por casilla. Las ubicaciones y
+ * las sucursales dependen del local y los lotes de lo que se vende, no del tipo de negocio, y
+ * publicar los precios en internet lo decide cada uno: ningún perfil los toca.
  */
-const PRESETS: { id: string; label: string; toggles: Omit<Toggles, "locations" | "lots"> }[] = [
+const PRESETS: {
+  id: string
+  label: string
+  toggles: Omit<Toggles, "locations" | "lots" | "branches" | "catalog">
+}[] = [
   {
     id: "bodega",
     label: "Bodega o abasto",
@@ -76,11 +126,18 @@ const PRESETS: { id: string; label: string; toggles: Omit<Toggles, "locations" |
       charges: false,
       recurring: true,
       payables: true,
+      variants: false,
+      tables: false,
+      modifiers: false,
+      kitchen: false,
+      recipes: false,
+      tips: false,
+      scale: true,
     },
   },
   {
     id: "tienda",
-    label: "Tienda (ferretería, ropa, repuestos…)",
+    label: "Tienda (ferretería, repuestos, variedades…)",
     toggles: {
       credit: true,
       quotes: true,
@@ -88,6 +145,32 @@ const PRESETS: { id: string; label: string; toggles: Omit<Toggles, "locations" |
       charges: false,
       recurring: true,
       payables: true,
+      variants: false,
+      tables: false,
+      modifiers: false,
+      kitchen: false,
+      recipes: false,
+      tips: false,
+      scale: false,
+    },
+  },
+  {
+    id: "ropa",
+    label: "Ropa, calzado o accesorios",
+    toggles: {
+      credit: true,
+      quotes: false,
+      priceLists: true,
+      charges: false,
+      recurring: true,
+      payables: true,
+      variants: true,
+      tables: false,
+      modifiers: false,
+      kitchen: false,
+      recipes: false,
+      tips: false,
+      scale: false,
     },
   },
   {
@@ -100,6 +183,13 @@ const PRESETS: { id: string; label: string; toggles: Omit<Toggles, "locations" |
       charges: true,
       recurring: true,
       payables: true,
+      variants: false,
+      tables: true,
+      modifiers: true,
+      kitchen: true,
+      recipes: true,
+      tips: true,
+      scale: false,
     },
   },
   {
@@ -112,9 +202,23 @@ const PRESETS: { id: string; label: string; toggles: Omit<Toggles, "locations" |
       charges: true,
       recurring: true,
       payables: true,
+      variants: false,
+      tables: false,
+      modifiers: false,
+      kitchen: false,
+      recipes: false,
+      tips: false,
+      scale: false,
     },
   },
 ]
+
+/** Las sucursales tienen sus ubicaciones y sus cajas: van de la mano con «Varias ubicaciones». */
+function linked(key: keyof Toggles, on: boolean): Partial<Toggles> {
+  if (key === "branches" && on) return { branches: true, locations: true }
+  if (key === "locations" && !on) return { locations: false, branches: false }
+  return { [key]: on }
+}
 
 /**
  * Funciones que el comercio usa. Las apagadas se esconden del menú y de la caja; no se borra nada
@@ -193,7 +297,7 @@ export function FeaturesCard() {
                 disabled={!current || busy}
                 onChange={(e) =>
                   void save(
-                    { [o.key]: e.target.checked },
+                    linked(o.key, e.target.checked),
                     `${o.label}: ${e.target.checked ? "encendido" : "apagado"}`,
                   )
                 }

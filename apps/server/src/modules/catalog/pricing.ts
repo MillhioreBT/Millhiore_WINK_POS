@@ -43,7 +43,9 @@ function selectRows(tx: Tx, body: BulkPriceBody) {
     if (!exists) throw new HttpError(404, "NOT_FOUND", "No existe esa categoría")
   }
   const filters = [
-    body.variantIds ? inArray(variant.id, body.variantIds) : eq(product.active, true),
+    body.variantIds
+      ? inArray(variant.id, body.variantIds)
+      : and(eq(product.active, true), eq(variant.active, true)),
     body.categoryId === "none"
       ? isNull(product.categoryId)
       : body.categoryId
@@ -54,7 +56,7 @@ function selectRows(tx: Tx, body: BulkPriceBody) {
     .select({
       productId: product.id,
       variantId: variant.id,
-      name: product.name,
+      name: variant.name,
       sku: variant.sku,
       taxId: product.taxId,
       priceMinor: variant.priceMinor,
@@ -65,7 +67,7 @@ function selectRows(tx: Tx, body: BulkPriceBody) {
     .from(product)
     .innerJoin(variant, eq(variant.productId, product.id))
     .where(and(...filters))
-    .orderBy(asc(product.name))
+    .orderBy(asc(product.name), asc(variant.name))
     .all()
 }
 

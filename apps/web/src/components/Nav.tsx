@@ -1,4 +1,5 @@
 import { cn } from "@millhiore/ui"
+import { useQuery } from "@tanstack/react-query"
 import { Link, useRouterState } from "@tanstack/react-router"
 import {
   ArrowLeftRightIcon,
@@ -6,28 +7,36 @@ import {
   BookOpenIcon,
   BoxesIcon,
   CalendarClockIcon,
+  ChefHatIcon,
   ChevronDownIcon,
   ClipboardCheckIcon,
+  CookingPotIcon,
   FileTextIcon,
   LandmarkIcon,
   LayoutDashboardIcon,
   type LucideIcon,
   PackageIcon,
+  PuzzleIcon,
   ReceiptTextIcon,
   ScrollTextIcon,
   SettingsIcon,
+  ShoppingBagIcon,
   ShoppingCartIcon,
+  SquareMenuIcon,
   TruckIcon,
   UsersIcon,
   WalletIcon,
 } from "lucide-react"
 import { useEffect, useState } from "react"
+import { ordersCountQuery, pluginPagesQuery } from "../lib/queries"
 import { can, useFeatures, useMe } from "../lib/session"
 
 export interface NavLink {
   to: string
   label: string
   icon: LucideIcon
+  /** Cuántos esperan (los pedidos nuevos). */
+  badge?: number | undefined
 }
 
 /** Una entrada del menú: un enlace suelto o una sección con sus enlaces. */
@@ -43,13 +52,23 @@ export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
   const me = useMe()
   const features = useFeatures()
   const show = (...p: string[]) => can(me, ...p)
+  const ordersOn = features.catalog && show("sale.create")
+  const orders = useQuery({ ...ordersCountQuery, enabled: ordersOn }).data?.new ?? 0
+  const pluginPages = useQuery(pluginPagesQuery).data ?? []
   const entries: (NavEntry | null)[] = [
     show("report.view") ? { to: "/inicio", label: "Inicio", icon: LayoutDashboardIcon } : null,
     group("Ventas", ShoppingCartIcon, [
       show("sale.create") ? { to: "/caja", label: "Vender", icon: ShoppingCartIcon } : null,
+      features.tables && show("table.serve")
+        ? { to: "/mesas", label: "Mesas", icon: SquareMenuIcon }
+        : null,
+      features.kitchen && show("kitchen.view")
+        ? { to: "/cocina", label: "Cocina", icon: ChefHatIcon }
+        : null,
       show("sale.create", "report.view")
         ? { to: "/ventas", label: "Historial", icon: ReceiptTextIcon }
         : null,
+      ordersOn ? { to: "/pedidos", label: "Pedidos", icon: ShoppingBagIcon, badge: orders } : null,
       features.quotes && show("sale.create", "report.view")
         ? { to: "/cotizaciones", label: "Cotizaciones", icon: FileTextIcon }
         : null,
@@ -60,7 +79,7 @@ export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
     show("catalog.manage", "inventory.view")
       ? { to: "/productos", label: "Productos", icon: PackageIcon }
       : null,
-    // Con varias ubicaciones, Inventario agrupa los ajustes y los traslados.
+    // Inventario agrupa los ajustes con el conteo, los traslados, los vencimientos y la producción.
     inventoryGroup([
       show("inventory.view", "inventory.adjust")
         ? { to: "/inventario", label: "Ajustes", icon: BoxesIcon }
@@ -73,6 +92,9 @@ export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
         : null,
       features.lots && show("inventory.view", "inventory.adjust")
         ? { to: "/vencimientos", label: "Vencimientos", icon: CalendarClockIcon }
+        : null,
+      features.recipes && show("inventory.view", "inventory.adjust")
+        ? { to: "/produccion", label: "Producción", icon: CookingPotIcon }
         : null,
     ]),
     show("purchase.create") ? { to: "/compras", label: "Compras", icon: TruckIcon } : null,
@@ -91,6 +113,12 @@ export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
         ? { to: "/cuentas", label: "Cuentas", icon: LandmarkIcon }
         : null,
     ]),
+    // Las pantallas de los plugins encendidos que esta persona puede usar.
+    group(
+      "Plugins",
+      PuzzleIcon,
+      pluginPages.map((p) => ({ to: `/plugin/${p.id}`, label: p.title, icon: PuzzleIcon })),
+    ),
   ]
   return {
     main: entries.filter((e): e is NavEntry => e !== null),
@@ -152,6 +180,7 @@ function NavGroup({
       >
         <entry.icon className={big ? "size-5" : "size-4"} />
         <span className="flex-1 text-left">{entry.label}</span>
+        {open ? null : <Count n={entry.items.reduce((n, i) => n + (i.badge ?? 0), 0)} />}
         <ChevronDownIcon className={cn("size-4 transition-transform", open && "rotate-180")} />
       </button>
       {open ? (
@@ -168,12 +197,24 @@ function NavGroup({
               activeProps={{ className: "font-semibold text-foreground" }}
             >
               <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-current" />
-              {i.label}
+              <span className="flex-1">{i.label}</span>
+              <Count n={i.badge ?? 0} />
             </Link>
           ))}
         </div>
       ) : null}
     </div>
+  )
+}
+
+/** Cuántos esperan, junto al nombre (nada si son cero). */
+function Count({ n }: { n: number }) {
+  if (n <= 0) return null
+  return (
+    <span className="min-w-5 rounded-full bg-warning px-1.5 text-center font-semibold text-[11px] text-warning-foreground leading-5 tabular">
+      {n > 99 ? "99+" : n}
+      <span className="sr-only"> por atender</span>
+    </span>
   )
 }
 
@@ -190,7 +231,8 @@ export function NavList({ big = false, onNavigate }: { big?: boolean; onNavigate
       activeProps={{ className: activeClass }}
     >
       <l.icon className={big ? "size-5" : "size-4"} />
-      {l.label}
+      <span className="flex-1">{l.label}</span>
+      <Count n={l.badge ?? 0} />
     </Link>
   )
   return (

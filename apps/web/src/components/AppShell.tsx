@@ -29,6 +29,8 @@ import { LockScreen } from "../features/account/LockScreen"
 import { ChangePasswordDialog, ForcedPasswordChange } from "../features/account/PasswordForms"
 import { PinDialog } from "../features/account/PinDialog"
 import { SessionsDialog } from "../features/account/SessionsPanel"
+import { useOrderAlerts } from "../features/orders/OrdersPage"
+import { useOfflineSync } from "../features/pos/offline"
 import { useLock } from "../lib/lock"
 import { bootstrapQuery } from "../lib/queries"
 import { signOut, useMe } from "../lib/session"
@@ -199,6 +201,10 @@ export function AppShell() {
   const unlock = useLock((s) => s.unlock)
   const locked = lockedFor === me.id && me.hasPin
   const idleMinutes = me.hasPin ? (boot?.security.autoLockMinutes ?? 0) : 0
+
+  // Las ventas cobradas sin conexión se envían solas, en cualquier pantalla (también bloqueada).
+  useOfflineSync(me.id)
+  useOrderAlerts()
 
   // Un bloqueo que quedó de otra persona, o de un PIN que ya no existe, no encierra a nadie.
   useEffect(() => {

@@ -21,6 +21,7 @@ import {
 import { eq } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
 import type { PostContext } from "../../posting/post"
+import { branchScope } from "../branches/service"
 import { normalizeTaxId } from "../contacts/service"
 
 export function readSetting<T>(db: Pick<Db, "select">, key: string): T | undefined {
@@ -115,6 +116,7 @@ export function postingContext(
     requireShift: requireShift(db),
     creditEnabled: creditEnabled(db),
     fiscal: fiscalSettings(db),
+    branchIds: branchScope(db, actorId),
   }
 }
 
@@ -128,12 +130,15 @@ export interface FiscalSettings {
   pricesIncludeTax: boolean
   /** IVA de los productos que no tienen uno asignado. */
   defaultTaxId: string
+  /** La caja ofrece «Con factura» y Ventas lleva la cuenta de las facturas por anotar. */
+  invoices: boolean
 }
 
 const FISCAL_KEYS = {
   taxpayer: "fiscal.taxpayer",
   pricesIncludeTax: "fiscal.pricesIncludeTax",
   defaultTaxId: "fiscal.defaultTaxId",
+  invoices: "fiscal.invoices",
 } as const
 
 export function fiscalSettings(db: Pick<Db, "select">): FiscalSettings {
@@ -144,6 +149,7 @@ export function fiscalSettings(db: Pick<Db, "select">): FiscalSettings {
       : "ordinary",
     pricesIncludeTax: readSetting<boolean>(db, FISCAL_KEYS.pricesIncludeTax) ?? true,
     defaultTaxId: readSetting<string>(db, FISCAL_KEYS.defaultTaxId) ?? DEFAULT_TAX_ID,
+    invoices: readSetting<boolean>(db, FISCAL_KEYS.invoices) ?? false,
   }
 }
 

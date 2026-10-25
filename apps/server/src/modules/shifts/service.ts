@@ -19,7 +19,13 @@ import { exchangeRate, isUuidv7, uuidv7 } from "@millhiore/domain"
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm"
 import { alias } from "drizzle-orm/sqlite-core"
 import { HttpError } from "../../http/errors"
-import { type PostContext, postDocumentIn } from "../../posting/post"
+import {
+  type PostContext,
+  postDocumentIn,
+  requireLocalServer,
+  requireOwnBranch,
+} from "../../posting/post"
+import { inBranches } from "../branches/service"
 import { rateAt } from "../rates/service"
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0]
@@ -167,6 +173,8 @@ export function openShift(db: Db, input: OpenShiftBody, ctx: PostContext): Shift
         .where(and(eq(cashShift.terminalId, term.id), eq(cashShift.status, "open")))
         .get()
       if (open) throw new HttpError(409, "SHIFT_OPEN", `${term.name} ya tiene un turno abierto`)
+      requireOwnBranch(tx, ctx, [term.locationId])
+      requireLocalServer(tx, [term.locationId])
 
       const accounts = cashAccounts(tx)
       const counts = countsByAccount(input.counts, accounts)
@@ -237,6 +245,11 @@ export function closeShift(
       if (!shift) throw new HttpError(404, "NOT_FOUND", `No existe el turno ${shiftId}`)
       if (shift.status === "closed")
         throw new HttpError(409, "SHIFT_CLOSED", "El turno ya está cerrado")
+      const term = tx.select().from(terminal).where(eq(terminal.id, shift.terminalId)).get()
+      if (term) {
+        requireOwnBranch(tx, ctx, [term.locationId])
+        requireLocalServer(tx, [term.locationId])
+      }
       const rows = tx
         .select({
           accountId: cashShiftAccount.accountId,
@@ -355,10 +368,17 @@ export function currentShift(db: Reader, terminalId: string): Shift | null {
   return open ? getShift(db, open.id) : null
 }
 
-export function listShifts(db: Db, limit: number): Shift[] {
+/** Los últimos turnos (con `branchIds`, solo los de las cajas de esas sucursales). */
+export function listShifts(
+  db: Db,
+  limit: number,
+  branchIds: readonly string[] | null = null,
+): Shift[] {
   return db
     .select({ id: cashShift.id })
     .from(cashShift)
+    .innerJoin(terminal, eq(terminal.id, cashShift.terminalId))
+    .where(inBranches(terminal.locationId, branchIds))
     .orderBy(desc(cashShift.openedAt))
     .limit(limit)
     .all()
@@ -431,6 +451,25 @@ export function shiftReport(db: Db, shiftId: string): ShiftReport {
     }
   }
 
+  // Propinas por quien las recibe ("" = el equipo); los reversos del turno las restan.
+  const tipTotals = new Map<string, number>()
+  for (const d of sales) {
+    if (d.tipLegalMinor === 0) continue
+    const key = d.tipUserId ?? ""
+    tipTotals.set(key, (tipTotals.get(key) ?? 0) + d.tipLegalMinor)
+  }
+  const tipUserIds = [...tipTotals.keys()].filter(Boolean)
+  const tipNames = new Map(
+    tipUserIds.length
+      ? db
+          .select({ id: user.id, name: user.name })
+          .from(user)
+          .where(inArray(user.id, tipUserIds))
+          .all()
+          .map((u) => [u.id, u.name])
+      : [],
+  )
+
   const adjustments = new Set(
     shift.accounts.length
       ? db
@@ -482,6 +521,14 @@ export function shiftReport(db: Db, shiftId: string): ShiftReport {
       count: supplierReturns.reduce((acc, d) => acc + (d.reversesDocumentId ? -1 : 1), 0),
       totalLegalMinor: supplierReturns.reduce((acc, d) => acc + d.totalLegalMinor, 0),
     },
+    tips: [...tipTotals]
+      .filter(([, total]) => total !== 0)
+      .map(([id, total]) => ({
+        userId: id || null,
+        name: id ? (tipNames.get(id) ?? id) : "Todo el equipo",
+        totalLegalMinor: total,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, "es")),
     byMethod: [...byMethod.values()]
       .filter((m) => m.amountMinor !== 0)
       .sort((a, b) => a.methodName.localeCompare(b.methodName, "es")),

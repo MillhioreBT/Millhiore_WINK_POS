@@ -1,4 +1,4 @@
-import type { Bootstrap, DocumentDetail } from "@millhiore/contracts"
+import type { Bootstrap, DocumentDetail, PrintBillBody } from "@millhiore/contracts"
 import { type Align, EscPos } from "./escpos"
 
 /** Columnas de texto por ancho de papel con la letra normal (Font A). */
@@ -25,6 +25,19 @@ const amount = new Intl.NumberFormat("es-VE", {
   maximumFractionDigits: 2,
 })
 const qty = new Intl.NumberFormat("es-VE", { maximumFractionDigits: 3 })
+const grams = new Intl.NumberFormat("es-VE", {
+  minimumFractionDigits: 3,
+  maximumFractionDigits: 3,
+})
+
+/** "0,350 kg" o "1,5 l" en lo que se vende por kilo, litro o metro; "2" por unidad. */
+function quantity(milli: number, unit: string | undefined): string {
+  if (!unit || unit === "unit") return qty.format(milli / 1000)
+  return `${(unit === "kg" ? grams : qty).format(milli / 1000)} ${unit}`
+}
+
+/** "/kg" detrás del precio por kilo, litro o metro. */
+const per = (unit: string | undefined) => (!unit || unit === "unit" ? "" : `/${unit}`)
 
 export function money(minor: number, currency: string): string {
   return `${SYMBOLS[currency] ?? currency} ${amount.format(minor / 100)}`
@@ -93,6 +106,7 @@ const TITLE: Record<string, string> = {
   DEBT_OUT: "CUENTA POR PAGAR",
   STOCK_TRANSFER: "TRASLADO DE INVENTARIO",
   PURCHASE_RETURN: "DEVOLUCIÓN A PROVEEDOR",
+  PRODUCTION: "PRODUCCIÓN",
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -101,17 +115,27 @@ const KIND_LABEL: Record<string, string> = {
   not_subject: "No sujeto",
 }
 
-/** Encabezado con los datos del negocio. */
-export function headerLines(business: Business, width: number): PrintLine[] {
+/**
+ * Encabezado con los datos del negocio. Lo de una sucursal lleva su nombre y, si los tiene, su
+ * dirección y su teléfono en lugar de los del negocio.
+ */
+export function headerLines(
+  business: Business,
+  width: number,
+  branch?: DocumentDetail["branch"],
+): PrintLine[] {
   const center = (text: string): PrintLine[] =>
     wrap(text, width).map((t) => ({ text: t, align: "center" }))
+  const address = branch?.address ?? business.address
+  const phone = branch?.phone ?? business.phone
   return [
     ...wrap(business.name, width).map(
       (t): PrintLine => ({ text: t, align: "center", bold: true, tall: true }),
     ),
+    ...(branch ? center(`Sucursal ${branch.name}`) : []),
     ...(business.taxId ? center(`RIF ${business.taxId}`) : []),
-    ...(business.address ? center(business.address) : []),
-    ...(business.phone ? center(`Tel. ${business.phone}`) : []),
+    ...(address ? center(address) : []),
+    ...(phone ? center(`Tel. ${phone}`) : []),
   ]
 }
 
@@ -127,7 +151,7 @@ export function receiptLines(doc: DocumentDetail, business: Business, width: num
   const pair = (left: string, right: string, bold = false): PrintLine[] =>
     columns(left, right, width).map((t) => ({ text: t, bold }))
 
-  const out: PrintLine[] = [...headerLines(business, width)]
+  const out: PrintLine[] = [...headerLines(business, width, doc.branch)]
   out.push(...center(TITLE[doc.type] ?? doc.type))
   out.push(...center(`${doc.number} · ${dateTime(doc.postedAt, business.timezone)}`))
   if (doc.createdBy) out.push(...center(`Atendió: ${doc.createdBy}`))
@@ -141,6 +165,12 @@ export function receiptLines(doc: DocumentDetail, business: Business, width: num
         : "Cliente"
     out.push(
       ...center(`${who}: ${doc.contactName}${doc.contactTaxId ? ` · ${doc.contactTaxId}` : ""}`),
+    )
+  }
+  if (doc.invoiceRequested && doc.contactAddress) out.push(...center(doc.contactAddress))
+  if (doc.invoice) {
+    out.push(
+      ...center(`Factura N.º ${doc.invoice.invoiceNumber} · Control ${doc.invoice.controlNumber}`),
     )
   }
   if (doc.expenseCategoryName) out.push(...center(`Categoría: ${doc.expenseCategoryName}`))
@@ -161,11 +191,27 @@ export function receiptLines(doc: DocumentDetail, business: Business, width: num
     out.push(...center(`A: ${reversed ? doc.locationName : doc.toLocationName}`))
     out.push(rule)
     for (const l of doc.lines) {
-      out.push(...pair(l.name, qty.format(Math.abs(l.qtyMilli) / 1000)))
+      out.push(...pair(l.name, quantity(Math.abs(l.qtyMilli), l.unit)))
     }
     out.push(rule)
     const units = doc.lines.reduce((acc, l) => acc + Math.abs(l.qtyMilli), 0)
     out.push(...pair("UNIDADES", qty.format(units / 1000), true))
+    return out
+  }
+
+  // Producción: lo producido y, debajo, lo que se gastó de cada ingrediente (o volvió, al anular).
+  if (doc.type === "PRODUCTION") {
+    out.push(...center(`En: ${doc.locationName}`))
+    out.push(rule)
+    for (const l of doc.lines) {
+      out.push(...pair(l.name, quantity(Math.abs(l.qtyMilli), l.unit), true))
+      if (l.ingredients.length) {
+        out.push({ text: doc.reversesDocumentId ? "Volvió:" : "Se gastó:" })
+      }
+      for (const i of l.ingredients) {
+        out.push(...pair(`  ${i.name}`, qty.format(i.qtyMilli / 1000)))
+      }
+    }
     return out
   }
 
@@ -187,10 +233,14 @@ export function receiptLines(doc: DocumentDetail, business: Business, width: num
   for (const l of doc.lines) {
     const exempt = l.taxId && l.taxRateBp === 0 ? " (E)" : ""
     out.push(...wrap(`${l.name}${exempt}`, width).map((t) => ({ text: t })))
+    // Las opciones y extras elegidos, debajo del nombre (su precio ya va en el del producto).
+    for (const m of l.modifiers ?? []) {
+      out.push(...wrap(`+ ${m.name}`, width - 2).map((t) => ({ text: `  ${t}` })))
+    }
     // Con descuento se muestra el importe de lista y, debajo, lo que se descontó.
     out.push(
       ...pair(
-        `${qty.format(l.qtyMilli / 1000)} × ${money(l.unitPriceMinor, cur)}`,
+        `${quantity(l.qtyMilli, l.unit)} × ${money(l.unitPriceMinor, cur)}${per(l.unit)}`,
         money(l.lineTotalMinor + l.discountMinor, cur),
       ),
     )
@@ -236,6 +286,12 @@ export function receiptLines(doc: DocumentDetail, business: Business, width: num
   }
   const total = doc.totalMinor + doc.surchargeMinor
   if (doc.surchargeMinor) out.push(...pair("TOTAL A PAGAR", money(total, cur), true))
+  // La propina va aparte de la venta: no lleva IVA ni IGTF.
+  if (doc.tipMinor) {
+    const who = doc.tipUserName ? ` (${doc.tipUserName})` : ""
+    out.push(...pair(`Propina${who}`, money(doc.tipMinor, cur)))
+    out.push(...pair("CON PROPINA", money(total + doc.tipMinor, cur), true))
+  }
   if (doc.rate && doc.rate.quote === cur) {
     const ref = Math.round(total / Number(doc.rate.value))
     out.push(...center(`Tasa BCV ${rate(doc.rate.value)} · Ref. ${money(ref, doc.rate.base)}`))
@@ -280,6 +336,28 @@ export function receiptLines(doc: DocumentDetail, business: Business, width: num
     out.push(...center(business.receiptFooter ?? "¡Gracias por su compra!"))
   }
   return out
+}
+
+/** Una precuenta armada en la caja (los montos ya vienen escritos). */
+export function billLines(bill: PrintBillBody, business: Business, width: number): PrintLine[] {
+  const rule: PrintLine = { text: "-".repeat(width) }
+  const center = (text: string): PrintLine[] =>
+    wrap(text, width).map((t) => ({ text: t, align: "center" }))
+  return [
+    ...headerLines(business, width),
+    { text: bill.title, align: "center", bold: true },
+    ...bill.info.flatMap(center),
+    rule,
+    ...bill.items.flatMap((i): PrintLine[] => [
+      ...wrap(i.name, width).map((t) => ({ text: t })),
+      ...columns(i.detail, i.amount, width).map((t) => ({ text: t })),
+    ]),
+    rule,
+    ...bill.rows.flatMap((r) =>
+      columns(r.label, r.amount, width).map((t): PrintLine => ({ text: t, bold: r.bold ?? false })),
+    ),
+    ...(bill.footer.length ? [rule, ...bill.footer.flatMap(center)] : []),
+  ]
 }
 
 /** Página de prueba: confirma que la impresora, el papel y los acentos salen bien. */

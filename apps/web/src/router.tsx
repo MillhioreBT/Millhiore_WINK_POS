@@ -15,8 +15,12 @@ import { ExpensesPage } from "./features/expenses/ExpensesPage"
 import { CountPage } from "./features/inventory/CountPage"
 import { ExpiryPage } from "./features/inventory/ExpiryPage"
 import { InventoryPage } from "./features/inventory/InventoryPage"
+import { ProductionPage } from "./features/inventory/ProductionPage"
 import { TransfersPage } from "./features/inventory/TransfersPage"
+import { KitchenPage } from "./features/kitchen/KitchenPage"
+import { OrdersPage } from "./features/orders/OrdersPage"
 import { PayablesPage } from "./features/payables/PayablesPage"
+import { PluginPage } from "./features/plugins/PluginPage"
 import { PosPage } from "./features/pos/PosPage"
 import { ProductsPage } from "./features/products/ProductsPage"
 import { PurchasesPage } from "./features/purchases/PurchasesPage"
@@ -26,6 +30,8 @@ import { ReportsPage } from "./features/reports/ReportsPage"
 import { SalesPage } from "./features/sales/SalesPage"
 import { SettingsPage } from "./features/settings/SettingsPage"
 import { SetupPage } from "./features/setup/SetupPage"
+import { FloorPage } from "./features/tables/FloorPage"
+import { TabPage } from "./features/tables/TabPage"
 import { healthQuery, meQuery, queryClient } from "./lib/queries"
 import { can } from "./lib/session"
 
@@ -69,12 +75,26 @@ const appRoute = createRoute({
   component: AppShell,
 })
 
-/** Quien ve informes entra al resumen del día; el cajero, directo a la caja. */
+/**
+ * Quien ve informes entra al resumen del día; el cajero, directo a la caja; el mesonero, a las
+ * mesas; la cocina, a sus comandas.
+ */
 const indexRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/",
   beforeLoad: ({ context }) => {
-    throw redirect({ to: can(context.me, "report.view") ? "/inicio" : "/caja" })
+    const me = context.me
+    throw redirect({
+      to: can(me, "report.view")
+        ? "/inicio"
+        : can(me, "sale.create")
+          ? "/caja"
+          : can(me, "table.serve")
+            ? "/mesas"
+            : can(me, "kitchen.view")
+              ? "/cocina"
+              : "/caja",
+    })
   },
 })
 
@@ -85,6 +105,25 @@ const dashboardRoute = createRoute({
 })
 
 const posRoute = createRoute({ getParentRoute: () => appRoute, path: "/caja", component: PosPage })
+const floorRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/mesas",
+  component: FloorPage,
+})
+const kitchenRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/cocina",
+  component: KitchenPage,
+})
+const tabRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/mesas/$tabId",
+  component: function TabRoute() {
+    const { tabId } = tabRoute.useParams()
+    // Con la clave, cambiar de cuenta (al juntar mesas) arranca la pantalla de cero.
+    return <TabPage key={tabId} tabId={tabId} />
+  },
+})
 const productsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/productos",
@@ -94,6 +133,19 @@ const salesRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/ventas",
   component: SalesPage,
+})
+const pluginRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/plugin/$pluginId",
+  component: function PluginRoute() {
+    const { pluginId } = pluginRoute.useParams()
+    return <PluginPage key={pluginId} pluginId={pluginId} />
+  },
+})
+const ordersRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/pedidos",
+  component: OrdersPage,
 })
 const quotesRoute = createRoute({
   getParentRoute: () => appRoute,
@@ -129,6 +181,11 @@ const transfersRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/traslados",
   component: TransfersPage,
+})
+const productionRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/produccion",
+  component: ProductionPage,
 })
 const countRoute = createRoute({
   getParentRoute: () => appRoute,
@@ -171,9 +228,14 @@ const routeTree = rootRoute.addChildren([
     indexRoute,
     dashboardRoute,
     posRoute,
+    floorRoute,
+    kitchenRoute,
+    tabRoute,
     productsRoute,
     salesRoute,
     quotesRoute,
+    ordersRoute,
+    pluginRoute,
     receivablesRoute,
     purchasesRoute,
     expensesRoute,
@@ -182,6 +244,7 @@ const routeTree = rootRoute.addChildren([
     inventoryRoute,
     transfersRoute,
     expiryRoute,
+    productionRoute,
     countRoute,
     reportsRoute,
     contactsRoute,

@@ -43,7 +43,9 @@ import {
 } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
+import { CentralNotice } from "../../components/CentralNotice"
 import { ApiError, api, errorMessage } from "../../lib/api"
+import { useBranchNames } from "../../lib/branches"
 import { formatDateTime, formatPercent, formatRate } from "../../lib/format"
 import {
   bootstrapQuery,
@@ -57,14 +59,21 @@ import {
   type UserRow,
   usersQuery,
 } from "../../lib/queries"
-import { can, useFeatures, useMe } from "../../lib/session"
+import { can, useCentral, useFeatures, useMe } from "../../lib/session"
+import { BranchAccess } from "../account/BranchAccess"
 import { SessionsPanel } from "../account/SessionsPanel"
 import { EditUserDialog, ResetPasswordDialog } from "../account/UserDialogs"
+import { KitchenCard } from "../kitchen/KitchenCard"
 import { BusinessHeader } from "../sales/ReceiptDialog"
+import { DiningCard } from "../tables/LayoutDialog"
 import { AuditTab } from "./AuditTab"
+import { BranchesCard } from "./BranchesCard"
 import { ChargesCard } from "./ChargesCard"
+import { DevicesTab } from "./DevicesTab"
 import { FeaturesCard } from "./FeaturesCard"
+import { IntegrationsTab } from "./IntegrationsTab"
 import { LocationsCard } from "./LocationsCard"
+import { ScaleCard } from "./ScaleCard"
 
 const SOURCE: Record<string, string> = {
   bcv: "BCV",
@@ -362,6 +371,23 @@ function TaxesTab() {
                 </p>
               </div>
             </div>
+            <div className="flex items-start gap-3">
+              <input
+                id="f-invoices"
+                type="checkbox"
+                className="mt-0.5 size-4 accent-[var(--primary)]"
+                checked={f.invoices}
+                onChange={(e) => saveFiscal({ invoices: e.target.checked })}
+              />
+              <div className="grid grid-cols-1 gap-1">
+                <Label htmlFor="f-invoices">Doy facturas con máquina fiscal o talonario</Label>
+                <p className="text-muted-foreground text-xs">
+                  La caja ofrece «Con factura» y pide los datos del cliente; en Ventas se anotan el
+                  número de la factura y el de control para el libro de ventas. Este sistema todavía
+                  no emite facturas: lo hará con el medio digital del SENIAT cuando salga su norma.
+                </p>
+              </div>
+            </div>
             <Field label="IVA por defecto de los productos" htmlFor="f-default">
               <NativeSelect
                 id="f-default"
@@ -436,16 +462,30 @@ function UsersTab() {
   const users = useQuery(usersQuery)
   const roles = useQuery(rolesQuery)
   const [form, setForm] = useState({ name: "", username: "", password: "", roleId: "cashier" })
+  // Sucursales del usuario nuevo: null, todas (quien trabaja en algunas reparte de las suyas).
+  const myBranches = me.branchIds
+  const [branchIds, setBranchIds] = useState<string[] | null>(myBranches)
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState<UserRow | null>(null)
   const [resetting, setResetting] = useState<UserRow | null>(null)
   const roleName = (id: string | null) => roles.data?.find((r) => r.id === id)?.name ?? id ?? "—"
+  const branchNames = useBranchNames()
+  const whereWorks = (u: UserRow) =>
+    branchNames.size && u.branchIds
+      ? u.branchIds.map((id) => branchNames.get(id) ?? "").join(", ")
+      : null
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault()
     setBusy(true)
     try {
-      await api("/api/users", { body: { ...form, username: form.username.trim().toLowerCase() } })
+      await api("/api/users", {
+        body: {
+          ...form,
+          username: form.username.trim().toLowerCase(),
+          branchIds: form.roleId === "owner" ? null : branchIds,
+        },
+      })
       toast.success(`Usuario ${form.username} creado`)
       setForm({ name: "", username: "", password: "", roleId: form.roleId })
       await queryClient.invalidateQueries({ queryKey: ["users"] })
@@ -489,7 +529,12 @@ function UsersTab() {
                     ) : null}
                   </TableCell>
                   <TableCell className="hidden sm:table-cell">{u.username}</TableCell>
-                  <TableCell>{roleName(u.roleId)}</TableCell>
+                  <TableCell className="whitespace-normal">
+                    {roleName(u.roleId)}
+                    {whereWorks(u) ? (
+                      <span className="block text-muted-foreground text-xs">{whereWorks(u)}</span>
+                    ) : null}
+                  </TableCell>
                   <TableCell className="hidden md:table-cell">
                     {u.active ? (
                       <Badge variant="success">Activo</Badge>
@@ -594,7 +639,13 @@ function UsersTab() {
                 ))}
               </NativeSelect>
             </Field>
-            <Button type="submit" disabled={busy}>
+            <BranchAccess
+              id="u-branches"
+              value={branchIds}
+              roleId={form.roleId}
+              onChange={setBranchIds}
+            />
+            <Button type="submit" disabled={busy || (branchIds !== null && branchIds.length === 0)}>
               {busy ? "Creando…" : "Crear usuario"}
             </Button>
           </form>
@@ -612,12 +663,17 @@ const businessQuery = queryOptions({
 function BusinessTab() {
   const profile = useQuery(businessQuery)
   const features = useFeatures()
+  const central = useCentral()
   if (!profile.data) return <p className="text-muted-foreground">Cargando…</p>
   return (
     <div className="grid grid-cols-1 gap-4">
       <BusinessForm key={JSON.stringify(profile.data)} profile={profile.data} />
       <FeaturesCard />
+      {features.branches && !central ? <BranchesCard /> : null}
       {features.locations ? <LocationsCard /> : null}
+      {features.tables ? <DiningCard /> : null}
+      {features.kitchen ? <KitchenCard /> : null}
+      {features.scale ? <ScaleCard /> : null}
       <SecurityCard />
     </div>
   )
@@ -1203,13 +1259,16 @@ export function SettingsPage() {
     { id: "impuestos", label: "Impuestos", show: can(me, "settings.manage") },
     { id: "usuarios", label: "Usuarios", show: can(me, "user.manage") },
     { id: "impresora", label: "Impresora", show: can(me, "settings.manage") },
+    { id: "equipos", label: "Equipos", show: true },
     { id: "respaldos", label: "Respaldos", show: can(me, "settings.manage") },
+    { id: "integraciones", label: "Integraciones", show: can(me, "settings.manage") },
     { id: "sesiones", label: "Sesiones", show: can(me, "user.manage") },
     { id: "bitacora", label: "Bitácora", show: can(me, "audit.view") },
   ].filter((t) => t.show)
   return (
     <div className="grid grid-cols-1 gap-4">
       <h1 className="font-semibold text-xl">Ajustes</h1>
+      <CentralNotice what="el negocio, la tasa, los impuestos, los usuarios y las contraseñas" />
       <Tabs
         key={tab ?? ""}
         defaultValue={tabs.find((t) => t.id === tab)?.id ?? tabs[0]?.id ?? "tasa"}
@@ -1247,6 +1306,14 @@ export function SettingsPage() {
         {can(me, "settings.manage") ? (
           <TabsContent value="respaldos">
             <BackupsTab />
+          </TabsContent>
+        ) : null}
+        <TabsContent value="equipos">
+          <DevicesTab />
+        </TabsContent>
+        {can(me, "settings.manage") ? (
+          <TabsContent value="integraciones">
+            <IntegrationsTab />
           </TabsContent>
         ) : null}
         {can(me, "user.manage") ? (

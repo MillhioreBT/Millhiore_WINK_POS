@@ -1,4 +1,10 @@
-import type { CatalogItem, CreateProductBody, UpdateProductBody } from "@millhiore/contracts"
+import type {
+  CatalogItem,
+  CreateProductBody,
+  ProductDetail,
+  UpdateProductBody,
+  VariantInput,
+} from "@millhiore/contracts"
 import {
   auditLog,
   business,
@@ -7,32 +13,50 @@ import {
   lot,
   lotBalance,
   product,
+  productImage,
   stockBalance,
   tax,
   variant,
 } from "@millhiore/db"
-import { localDate, uuidv7 } from "@millhiore/domain"
-import { and, asc, eq, gt, inArray, like, or, sql } from "drizzle-orm"
+import {
+  combinations,
+  comboKey,
+  compareCombos,
+  localDate,
+  optionsProblem,
+  type ProductOption,
+  uuidv7,
+  variantName,
+} from "@millhiore/domain"
+import { and, asc, eq, gt, inArray, like, or, type SQL, sql } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
 import { requireActiveCategory } from "./categories"
+import { modifierGroupIdsByProduct, setProductModifierGroups } from "./modifiers"
 import { setListPrices } from "./priceLists"
+import { productsWithRecipe, recipeOf, setRecipe } from "./recipes"
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0]
 
 const itemColumns = {
   productId: product.id,
   variantId: variant.id,
-  name: product.name,
+  name: variant.name,
+  productName: product.name,
+  optionValues: variant.optionValues,
+  options: product.options,
   kind: product.kind,
+  unit: product.unit,
   sku: variant.sku,
   barcode: variant.barcode,
+  plu: variant.plu,
   priceMinor: variant.priceMinor,
   priceCurrency: variant.priceCurrency,
   taxId: product.taxId,
   categoryId: product.categoryId,
   tracksStock: product.tracksStock,
   tracksLots: product.tracksLots,
-  active: product.active,
+  productActive: product.active,
+  variantActive: variant.active,
   costMinor: variant.costMinor,
   costCurrency: variant.costCurrency,
   stockMilli: sql<number>`coalesce((select sum(${stockBalance.qtyMilli}) from ${stockBalance}
@@ -40,13 +64,57 @@ const itemColumns = {
   minStockMilli: variant.minStockMilli,
 }
 
-type Row = Omit<CatalogItem, "stockByLocation" | "expiry">
+type Row = Omit<CatalogItem, "stockByLocation" | "expiry"> & { variantActive: boolean }
+
+/**
+ * Las variantes de cada producto, juntas y en el orden de la cuadrícula (S azul, S negro, M
+ * azul…); los productos, en el orden en que vienen.
+ */
+function selectRows(db: Db | Tx, where: SQL | undefined): Row[] {
+  const rows = db
+    .select(itemColumns)
+    .from(product)
+    .innerJoin(variant, eq(variant.productId, product.id))
+    .where(where)
+    .orderBy(asc(product.name), asc(product.id), asc(variant.createdAt), asc(variant.id))
+    .all()
+  const modifierGroups = modifierGroupIdsByProduct(
+    db,
+    rows.length ? [...new Set(rows.map((r) => r.productId))] : [],
+  )
+  const withRecipe = productsWithRecipe(db)
+  const groups = new Map<string, Row[]>()
+  for (const { productActive, ...r } of rows) {
+    const row = {
+      ...r,
+      active: productActive && r.variantActive,
+      modifierGroupIds: modifierGroups.get(r.productId) ?? [],
+      hasRecipe: withRecipe.has(r.productId),
+    }
+    const group = groups.get(r.productId)
+    if (group) group.push(row)
+    else groups.set(r.productId, [row])
+  }
+  return [...groups.values()].flatMap((group) => {
+    const options = group[0]?.options
+    // Sin tallas ni colores, primero la que se vende (las demás quedaron de cuando las tenía).
+    return group.sort((a, b) =>
+      options
+        ? compareCombos(options, a.optionValues, b.optionValues)
+        : Number(b.variantActive) - Number(a.variantActive),
+    )
+  })
+}
 
 /**
  * Agrega a cada producto lo que hay en cada ubicación (la caja vende de la suya) y, si lleva
  * lotes, su próximo vencimiento y lo vencido en cada ubicación.
  */
-function withStock(db: Db | Tx, rows: Row[], now: number): CatalogItem[] {
+function withStock<T extends Row>(
+  db: Db | Tx,
+  rows: T[],
+  now: number,
+): (T & Pick<CatalogItem, "stockByLocation" | "expiry">)[] {
   const ids = rows.map((r) => r.variantId)
   const byVariant = new Map<string, Record<string, number>>()
   const balances =
@@ -105,11 +173,20 @@ function withStock(db: Db | Tx, rows: Row[], now: number): CatalogItem[] {
   }))
 }
 
-/** Productos con su variante de venta y la existencia total, ordenados por nombre. */
+const toItem = ({
+  variantActive: _,
+  ...item
+}: Row & Pick<CatalogItem, "stockByLocation" | "expiry">) => item
+
+/**
+ * Lo que se vende, una fila por variante (cada talla y color de un producto), ordenado por
+ * nombre y, dentro de cada producto, como su cuadrícula.
+ */
 export function listItems(
   db: Db | Tx,
   opts: {
     search?: string | undefined
+    /** También los productos y las variantes desactivados. */
     includeInactive?: boolean | undefined
     /** Para saber qué lotes ya vencieron. */
     now?: number | undefined
@@ -117,33 +194,70 @@ export function listItems(
 ): CatalogItem[] {
   const term = opts.search?.trim()
   const filters = [
-    opts.includeInactive ? undefined : eq(product.active, true),
+    opts.includeInactive ? undefined : and(eq(product.active, true), eq(variant.active, true)),
     term
-      ? or(like(product.name, `%${term}%`), eq(variant.sku, term), eq(variant.barcode, term))
+      ? or(
+          like(product.name, `%${term}%`),
+          like(variant.name, `%${term}%`),
+          eq(variant.sku, term),
+          eq(variant.barcode, term),
+        )
       : undefined,
   ].filter((f) => f !== undefined)
   return withStock(
     db,
-    db
-      .select(itemColumns)
-      .from(product)
-      .innerJoin(variant, eq(variant.productId, product.id))
-      .where(filters.length ? and(...filters) : undefined)
-      .orderBy(asc(product.name))
-      .all(),
+    selectRows(db, filters.length ? and(...filters) : undefined),
     opts.now ?? Date.now(),
-  )
+  ).map(toItem)
 }
 
-function itemById(db: Db | Tx, productId: string): CatalogItem {
-  const row = db
-    .select(itemColumns)
-    .from(product)
-    .innerJoin(variant, eq(variant.productId, product.id))
-    .where(eq(product.id, productId))
-    .get()
+/** El producto con todas sus variantes (también las desactivadas), en orden. */
+export function productDetail(db: Db | Tx, productId: string, now: number): ProductDetail {
+  const p = db.select().from(product).where(eq(product.id, productId)).get()
+  if (!p) throw new HttpError(404, "NOT_FOUND", `No existe el producto ${productId}`)
+  return {
+    productId: p.id,
+    name: p.name,
+    kind: p.kind,
+    unit: p.unit,
+    taxId: p.taxId,
+    categoryId: p.categoryId,
+    tracksStock: p.tracksStock,
+    tracksLots: p.tracksLots,
+    active: p.active,
+    options: p.options,
+    description: p.description,
+    inCatalog: p.inCatalog,
+    imageVersion:
+      db
+        .select({ v: productImage.updatedAt })
+        .from(productImage)
+        .where(eq(productImage.productId, productId))
+        .get()?.v ?? null,
+    variants: withStock(db, selectRows(db, eq(product.id, productId)), now),
+    recipe: recipeOf(db, productId),
+  }
+}
+
+/** La variante que representa al producto: la primera que se vende (o la primera, si ninguna). */
+function itemById(db: Db | Tx, productId: string, now = Date.now()): CatalogItem {
+  const rows = selectRows(db, eq(product.id, productId))
+  const row = rows.find((r) => r.variantActive) ?? rows[0]
   if (!row) throw new HttpError(404, "NOT_FOUND", `No existe el producto ${productId}`)
-  return withStock(db, [row], Date.now())[0] ?? { ...row, stockByLocation: {}, expiry: null }
+  const [item] = withStock(db, [row], now).map(toItem)
+  return item ?? { ...row, stockByLocation: {}, expiry: null }
+}
+
+/** Lo que queda en la bitácora: el producto o, si tiene tallas y colores, con todas ellas. */
+function snapshot(db: Db | Tx, productId: string, now: number): unknown {
+  const detail = productDetail(db, productId, now)
+  return detail.options
+    ? detail
+    : {
+        ...itemById(db, productId, now),
+        description: detail.description,
+        inCatalog: detail.inCatalog,
+      }
 }
 
 function checkReferences(
@@ -171,14 +285,64 @@ function nextSku(tx: Tx): string {
   }
 }
 
+/** SKU de una combinación sin código propio: el del producto con un número, P00012-1, P00012-2… */
+function nextVariantSku(tx: Tx, base: string, taken: Set<string>): string {
+  for (let i = 1; ; i++) {
+    const sku = `${base}-${i}`
+    if (taken.has(sku)) continue
+    if (!tx.select({ id: variant.id }).from(variant).where(eq(variant.sku, sku)).get()) {
+      taken.add(sku)
+      return sku
+    }
+  }
+}
+
 /** SQLite rechaza SKU o código de barras repetidos con UNIQUE: se traduce a un 409 claro. */
 function duplicateCode(e: unknown): never {
   const text = String((e as Error).cause ?? (e as Error).message)
   if (/UNIQUE/i.test(text)) {
-    const field = /barcode/.test(text) ? "código de barras" : "SKU"
+    const field = /barcode/.test(text)
+      ? "código de barras"
+      : /plu/.test(text)
+        ? "código de balanza"
+        : "SKU"
     throw new HttpError(409, "DUPLICATE_CODE", `Ya existe otro producto con ese ${field}`)
   }
   throw e
+}
+
+const invalidOptions = (message: string) => new HttpError(422, "INVALID_OPTIONS", message)
+
+/** Valida las características y deja cada combinación con los valores tal como están escritos. */
+function checkOptions(options: readonly ProductOption[]): void {
+  const problem = optionsProblem(options)
+  if (problem) throw invalidOptions(problem)
+}
+
+/**
+ * Valida las combinaciones contra las características: un valor de cada una, de los que tiene, y
+ * sin repetirse. Devuelve los valores escritos como en las características (mayúsculas incluidas).
+ */
+function checkCombos(options: readonly ProductOption[], variants: readonly VariantInput[]) {
+  const seen = new Set<string>()
+  return variants.map((v) => {
+    if (v.values.length !== options.length) {
+      throw invalidOptions(
+        `Cada combinación lleva un valor de cada característica (${options.map((o) => o.name).join(", ")})`,
+      )
+    }
+    const values = v.values.map((value, i) => {
+      const match = options[i]?.values.find((x) => comboKey([x]) === comboKey([value]))
+      if (match === undefined) {
+        throw invalidOptions(`«${value}» no es un valor de «${options[i]?.name}»`)
+      }
+      return match
+    })
+    const key = comboKey(values)
+    if (seen.has(key)) throw invalidOptions(`La combinación ${values.join(", ")} está repetida`)
+    seen.add(key)
+    return { ...v, values }
+  })
 }
 
 function audit(tx: Tx, actorId: string, now: number, action: string, id: string, data: unknown) {
@@ -211,49 +375,109 @@ export function createProduct(
       if (input.tracksLots && input.kind !== "good") {
         throw new HttpError(422, "INVALID_LOTS", "Un servicio no lleva lotes")
       }
+      const options = input.options?.length ? input.options : null
+      if (options) {
+        checkOptions(options)
+        if (input.barcode) {
+          throw invalidOptions("Cada combinación lleva su propio código de barras")
+        }
+        if (input.plu) throw invalidOptions("Un producto con tallas o colores no va en la balanza")
+      } else if (input.variants?.length) {
+        throw invalidOptions("Para crear combinaciones, indica las tallas, colores…")
+      }
+      const variants = options
+        ? checkCombos(
+            options,
+            input.variants ??
+              combinations(options).map((values) => ({
+                values,
+                priceMinor: input.priceMinor,
+                active: true,
+              })),
+          )
+        : [
+            {
+              values: [] as string[],
+              sku: input.sku,
+              barcode: input.barcode,
+              plu: input.plu,
+              priceMinor: input.priceMinor,
+              active: true,
+              id: undefined,
+            },
+          ]
+      if (variants.length === 0) throw invalidOptions("Deja al menos una combinación")
+      if (variants.some((v) => v.id)) {
+        throw invalidOptions("Un producto nuevo no tiene combinaciones que editar")
+      }
       const productId = uuidv7(now)
-      const variantId = uuidv7(now)
+      const variantIds: string[] = []
       try {
         tx.insert(product)
           .values({
             id: productId,
             name: input.name,
             kind: input.kind,
+            unit: input.unit,
             tracksStock: input.kind === "good",
             tracksLots: input.kind === "good" && input.tracksLots,
             taxId: input.taxId ?? null,
             categoryId: input.categoryId ?? null,
+            options,
+            description: input.description?.trim() || null,
+            inCatalog: input.inCatalog ?? true,
             createdAt: now,
           })
           .run()
-        tx.insert(variant)
-          .values({
-            id: variantId,
-            productId,
-            sku: input.sku ?? nextSku(tx),
-            barcode: input.barcode ?? null,
-            name: input.name,
-            priceMinor: input.priceMinor,
-            priceCurrency: input.priceCurrency,
-            minStockMilli: input.kind === "good" ? (input.minStockMilli ?? null) : null,
-            createdAt: now,
-          })
-          .run()
+        const base = options ? (input.sku ?? nextSku(tx)) : null
+        const taken = new Set<string>()
+        for (const v of variants) {
+          const variantId = uuidv7(now)
+          variantIds.push(variantId)
+          tx.insert(variant)
+            .values({
+              id: variantId,
+              productId,
+              sku: v.sku ?? (base ? nextVariantSku(tx, base, taken) : nextSku(tx)),
+              barcode: v.barcode ?? null,
+              plu: "plu" in v ? (v.plu ?? null) : null,
+              name: variantName(input.name, options ? v.values : null),
+              optionValues: options ? v.values : null,
+              priceMinor: v.priceMinor,
+              priceCurrency: input.priceCurrency,
+              minStockMilli: input.kind === "good" ? (input.minStockMilli ?? null) : null,
+              active: v.active,
+              createdAt: now,
+            })
+            .run()
+        }
       } catch (e) {
         duplicateCode(e)
       }
-      const listPrices = input.listPrices?.length
-        ? setListPrices(tx, variantId, input.priceCurrency, input.listPrices).after
-        : undefined
-      const item = itemById(tx, productId)
-      audit(tx, actorId, now, "product.created", productId, { ...item, listPrices })
+      if (input.modifierGroupIds?.length) {
+        setProductModifierGroups(tx, productId, input.modifierGroupIds)
+      }
+      if (input.recipe?.length) setRecipe(tx, productId, input.recipe)
+      let listPrices: Record<string, number | null> | undefined
+      if (input.listPrices?.length) {
+        for (const variantId of variantIds) {
+          listPrices = setListPrices(tx, variantId, input.priceCurrency, input.listPrices).after
+        }
+      }
+      const item = itemById(tx, productId, now)
+      const data = snapshot(tx, productId, now)
+      audit(tx, actorId, now, "product.created", productId, { ...(data as object), listPrices })
       return item
     },
     { behavior: "immediate" },
   )
 }
 
-/** Edita el producto y su variante de venta. Los cambios de precio quedan en la auditoría. */
+/**
+ * Edita el producto y sus variantes. Con tallas y colores, los datos del producto (nombre, IVA,
+ * moneda, mínimo, precios por lista) valen para todas; el código y el precio, para cada una. Los
+ * cambios quedan en la auditoría.
+ */
 export function updateProduct(
   db: Db,
   productId: string,
@@ -263,59 +487,281 @@ export function updateProduct(
 ): CatalogItem {
   return db.transaction(
     (tx) => {
-      const before = itemById(tx, productId)
+      const current = tx.select().from(product).where(eq(product.id, productId)).get()
+      if (!current) throw new HttpError(404, "NOT_FOUND", `No existe el producto ${productId}`)
+      const before = snapshot(tx, productId, now)
       checkReferences(tx, {
         ...(patch.taxId ? { taxId: patch.taxId } : {}),
         ...(patch.categoryId ? { categoryId: patch.categoryId } : {}),
         ...(patch.priceCurrency ? { priceCurrency: patch.priceCurrency } : {}),
       })
-      if (patch.tracksLots && !before.tracksStock) {
+      if (patch.tracksLots && !current.tracksStock) {
         throw new HttpError(422, "INVALID_LOTS", "Un servicio no lleva lotes")
       }
+      const replacing = patch.options !== undefined
+      const options = replacing ? (patch.options?.length ? patch.options : null) : current.options
+      if (replacing && patch.variants === undefined) {
+        throw invalidOptions("Indica las combinaciones que se siguen vendiendo")
+      }
+      if (options) {
+        checkOptions(options)
+        if (patch.sku !== undefined || patch.barcode) {
+          throw invalidOptions("Cada combinación lleva su propio código")
+        }
+        if (patch.plu) throw invalidOptions("Un producto con tallas o colores no va en la balanza")
+      }
+      const name = patch.name ?? current.name
+      const existing = tx.select().from(variant).where(eq(variant.productId, productId)).all()
+      const byId = new Map(existing.map((v) => [v.id, v]))
+
       const productSet = {
         ...(patch.tracksLots !== undefined ? { tracksLots: patch.tracksLots } : {}),
         ...(patch.name !== undefined ? { name: patch.name } : {}),
+        ...(patch.unit !== undefined ? { unit: patch.unit } : {}),
         ...(patch.taxId !== undefined ? { taxId: patch.taxId } : {}),
         ...(patch.categoryId !== undefined ? { categoryId: patch.categoryId } : {}),
         ...(patch.active !== undefined ? { active: patch.active } : {}),
+        ...(replacing ? { options } : {}),
+        ...(patch.description !== undefined
+          ? { description: patch.description?.trim() || null }
+          : {}),
+        ...(patch.inCatalog !== undefined ? { inCatalog: patch.inCatalog } : {}),
       }
-      const variantSet = {
-        ...(patch.name !== undefined ? { name: patch.name } : {}),
-        ...(patch.sku !== undefined ? { sku: patch.sku } : {}),
-        ...(patch.barcode !== undefined ? { barcode: patch.barcode } : {}),
-        ...(patch.priceMinor !== undefined ? { priceMinor: patch.priceMinor } : {}),
+      // Lo que vale para todas las variantes del producto.
+      const shared = {
         ...(patch.priceCurrency !== undefined ? { priceCurrency: patch.priceCurrency } : {}),
-        ...(patch.minStockMilli !== undefined && before.tracksStock
+        ...(patch.minStockMilli !== undefined && current.tracksStock
           ? { minStockMilli: patch.minStockMilli }
           : {}),
-        ...(patch.active !== undefined ? { active: patch.active } : {}),
       }
+
       try {
         if (Object.keys(productSet).length) {
           tx.update(product).set(productSet).where(eq(product.id, productId)).run()
         }
-        if (Object.keys(variantSet).length) {
-          tx.update(variant).set(variantSet).where(eq(variant.id, before.variantId)).run()
+        if (Object.keys(shared).length) {
+          tx.update(variant).set(shared).where(eq(variant.productId, productId)).run()
+        }
+        if (options) {
+          editVariants(tx, {
+            productId,
+            name,
+            options,
+            replacing,
+            current: existing,
+            byId,
+            patch,
+            now,
+          })
+        } else {
+          editSingle(tx, { name, replacing, existing, byId, patch })
+        }
+        // El nombre de cada variante sigue al del producto (también el de las desactivadas).
+        if (patch.name !== undefined) {
+          const rows = tx
+            .select({ id: variant.id, optionValues: variant.optionValues })
+            .from(variant)
+            .where(eq(variant.productId, productId))
+            .all()
+          for (const v of rows) {
+            tx.update(variant)
+              .set({ name: variantName(name, v.optionValues) })
+              .where(eq(variant.id, v.id))
+              .run()
+          }
         }
       } catch (e) {
         duplicateCode(e)
       }
-      // Los precios propios por lista van en la moneda del precio base (la nueva, si cambió).
-      const listPrices = patch.listPrices?.length
-        ? setListPrices(
-            tx,
-            before.variantId,
-            patch.priceCurrency ?? before.priceCurrency,
-            patch.listPrices,
-          )
-        : undefined
-      const after = itemById(tx, productId)
+
+      // Los precios propios por lista van en la moneda del precio (la nueva, si cambió).
+      let listPrices: ReturnType<typeof setListPrices> | undefined
+      if (patch.listPrices?.length) {
+        const targets = tx
+          .select({ id: variant.id, priceCurrency: variant.priceCurrency })
+          .from(variant)
+          .where(and(eq(variant.productId, productId), eq(variant.active, true)))
+          .all()
+        for (const t of targets) {
+          listPrices = setListPrices(tx, t.id, t.priceCurrency, patch.listPrices)
+        }
+      }
+      if (patch.modifierGroupIds !== undefined) {
+        setProductModifierGroups(tx, productId, patch.modifierGroupIds)
+      }
+      if (patch.recipe !== undefined) setRecipe(tx, productId, patch.recipe)
+      const after = snapshot(tx, productId, now)
       audit(tx, actorId, now, "product.updated", productId, {
-        before: listPrices ? { ...before, listPrices: listPrices.before } : before,
-        after: listPrices ? { ...after, listPrices: listPrices.after } : after,
+        before: listPrices ? { ...(before as object), listPrices: listPrices.before } : before,
+        after: listPrices ? { ...(after as object), listPrices: listPrices.after } : after,
       })
-      return after
+      return itemById(tx, productId, now)
     },
     { behavior: "immediate" },
   )
+}
+
+type VariantRow = typeof variant.$inferSelect
+
+/** Producto que se vende de una sola forma (o deja de tener tallas y colores). */
+function editSingle(
+  tx: Tx,
+  ctx: {
+    name: string
+    replacing: boolean
+    existing: VariantRow[]
+    byId: Map<string, VariantRow>
+    patch: UpdateProductBody
+  },
+) {
+  const { patch, existing, byId } = ctx
+  let target: VariantRow | undefined
+  if (ctx.replacing) {
+    // Sin tallas ni colores queda una sola variante: la indicada o la primera que se vendía.
+    const [only, ...rest] = patch.variants ?? []
+    if (!only || rest.length) {
+      throw invalidOptions("Sin tallas ni colores, el producto se vende de una sola forma")
+    }
+    if (only.values.length) throw invalidOptions("Sin características, la combinación va vacía")
+    target = only.id ? byId.get(only.id) : (existing.find((v) => v.active) ?? existing[0])
+    if (!target) throw new HttpError(422, "UNKNOWN_VARIANT", "Esa combinación no es del producto")
+    for (const v of existing) {
+      if (v.id !== target.id && v.active) {
+        tx.update(variant).set({ active: false }).where(eq(variant.id, v.id)).run()
+      }
+    }
+    tx.update(variant)
+      .set({
+        optionValues: null,
+        name: ctx.name,
+        active: true,
+        priceMinor: only.priceMinor,
+        ...(only.sku !== undefined ? { sku: only.sku } : {}),
+        ...(only.barcode !== undefined ? { barcode: only.barcode } : {}),
+      })
+      .where(eq(variant.id, target.id))
+      .run()
+  } else {
+    if (patch.variants !== undefined) {
+      throw invalidOptions("Este producto no tiene tallas ni colores")
+    }
+    target = existing.find((v) => v.active) ?? existing[0]
+  }
+  if (!target) return
+  const set = {
+    ...(patch.name !== undefined ? { name: patch.name } : {}),
+    ...(patch.sku !== undefined ? { sku: patch.sku } : {}),
+    ...(patch.barcode !== undefined ? { barcode: patch.barcode } : {}),
+    ...(patch.plu !== undefined ? { plu: patch.plu } : {}),
+    ...(patch.priceMinor !== undefined ? { priceMinor: patch.priceMinor } : {}),
+    ...(patch.active !== undefined ? { active: patch.active } : {}),
+  }
+  if (Object.keys(set).length) {
+    tx.update(variant).set(set).where(eq(variant.id, target.id)).run()
+  }
+}
+
+/**
+ * Producto con tallas y colores. Las combinaciones con id se editan (conservan su existencia
+ * aunque cambien sus valores); las nuevas reusan la variante desactivada con los mismos valores o
+ * se crean. Al cambiar las características, las que no se mencionan se desactivan.
+ */
+function editVariants(
+  tx: Tx,
+  ctx: {
+    productId: string
+    name: string
+    options: ProductOption[]
+    replacing: boolean
+    current: VariantRow[]
+    byId: Map<string, VariantRow>
+    patch: UpdateProductBody
+    now: number
+  },
+) {
+  const { patch, options, byId } = ctx
+  if (patch.variants === undefined) {
+    // Solo datos del producto: el precio, si viene, para todas las que se venden.
+    if (patch.priceMinor !== undefined) {
+      tx.update(variant)
+        .set({ priceMinor: patch.priceMinor })
+        .where(and(eq(variant.productId, ctx.productId), eq(variant.active, true)))
+        .run()
+    }
+    return
+  }
+  const inputs = checkCombos(options, patch.variants)
+  const ids = new Set<string>()
+  for (const v of inputs) {
+    if (!v.id) continue
+    if (!byId.has(v.id)) {
+      throw new HttpError(422, "UNKNOWN_VARIANT", "Esa combinación no es del producto")
+    }
+    if (ids.has(v.id)) throw invalidOptions("Una combinación aparece dos veces")
+    ids.add(v.id)
+  }
+  // Las combinaciones nuevas recuperan la variante desactivada que ya tenía esos valores.
+  const spare = new Map(
+    ctx.current
+      .filter((v) => !ids.has(v.id) && v.optionValues)
+      .map((v) => [comboKey(v.optionValues ?? []), v]),
+  )
+  const resolved = inputs.map((v) => {
+    const reuse = v.id ? undefined : spare.get(comboKey(v.values))
+    if (reuse) {
+      spare.delete(comboKey(v.values))
+      ids.add(reuse.id)
+    }
+    return { ...v, id: v.id ?? reuse?.id }
+  })
+  // Las que quedan fuera: al cambiar las características se desactivan; si no, siguen como están.
+  const untouched = ctx.current.filter((v) => !ids.has(v.id))
+  if (ctx.replacing) {
+    for (const v of untouched) {
+      if (v.active) tx.update(variant).set({ active: false }).where(eq(variant.id, v.id)).run()
+    }
+  } else {
+    const keys = new Set(resolved.filter((v) => v.active).map((v) => comboKey(v.values)))
+    for (const v of untouched) {
+      if (v.active && v.optionValues && keys.has(comboKey(v.optionValues))) {
+        throw invalidOptions(`La combinación ${v.optionValues.join(", ")} ya existe`)
+      }
+    }
+  }
+
+  const first = ctx.current.find((v) => v.active) ?? ctx.current[0]
+  const base = first?.sku.replace(/-\d+$/, "") ?? `P${ctx.productId.slice(-5)}`
+  const taken = new Set<string>()
+  const model = first
+  for (const v of resolved) {
+    const common = {
+      name: variantName(ctx.name, v.values),
+      optionValues: v.values,
+      priceMinor: v.priceMinor,
+      active: v.active,
+      ...(v.barcode !== undefined ? { barcode: v.barcode } : {}),
+    }
+    if (v.id) {
+      tx.update(variant)
+        .set({ ...common, ...(v.sku !== undefined ? { sku: v.sku } : {}) })
+        .where(eq(variant.id, v.id))
+        .run()
+    } else {
+      tx.insert(variant)
+        .values({
+          ...common,
+          id: uuidv7(ctx.now),
+          productId: ctx.productId,
+          sku: v.sku ?? nextVariantSku(tx, base, taken),
+          barcode: v.barcode ?? null,
+          priceCurrency: patch.priceCurrency ?? model?.priceCurrency ?? "USD",
+          minStockMilli:
+            patch.minStockMilli !== undefined
+              ? patch.minStockMilli
+              : (model?.minStockMilli ?? null),
+          createdAt: ctx.now,
+        })
+        .run()
+    }
+  }
 }

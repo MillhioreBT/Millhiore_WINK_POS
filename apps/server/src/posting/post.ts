@@ -4,6 +4,7 @@ import {
   accountMove,
   allocation,
   auditLog,
+  branch,
   business,
   cashShift,
   contact,
@@ -29,9 +30,12 @@ import {
   stockMove,
   stockReason,
   surcharge,
+  syncPeer,
   tax,
   terminal,
+  user,
   variant,
+  webOrder,
 } from "@millhiore/db"
 import {
   type CurrencyBook,
@@ -45,6 +49,7 @@ import {
   type ExchangeRate,
   exchangeRate,
   formatDocumentNumber,
+  ingredientQty,
   isCashMovement,
   isReturn,
   isUuidv7,
@@ -54,10 +59,13 @@ import {
   lineTotal,
   localDate,
   money,
+  normalizeTaxId,
   type PlannedLine,
   type PlannedStockMove,
   PostingError,
   planPosting,
+  rateConverter,
+  recipeCost,
   type SurchargeGroup,
   splitTax,
   type TaxGroup,
@@ -67,8 +75,11 @@ import {
 import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm"
 import { alias } from "drizzle-orm/sqlite-core"
 import { allocateOut, applyLotMove, lotFor, lotQty, purchaseLots, returnableLots } from "./lots"
+import { pickModifiers } from "./modifiers"
 import { collectedOn, openPayables, openSales, owedInReference } from "./receivables"
+import { type Ingredient, recipesOf } from "./recipes"
 import { activeReturns, isReversed, returnableLines } from "./returns"
+import { checkTabPayment, settleTab, type TabTake } from "./tabs"
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0]
 
@@ -87,6 +98,10 @@ export interface PostLineInput {
   lotId?: string | undefined
   /** Producto con lotes: el lote nuevo que entra (compra, ajuste de entrada). */
   lot?: { code?: string | null | undefined; expiresOn: string | null } | undefined
+  /** Venta: opciones y extras elegidos (su precio ya va en `unitPriceMinor`). */
+  modifierIds?: readonly string[] | undefined
+  /** Venta: indicaciones para la cocina. */
+  note?: string | null | undefined
 }
 
 export interface PostPaymentInput {
@@ -118,6 +133,10 @@ export interface PostDocumentInput {
   pricesIncludeTax?: boolean | undefined
   /** Cliente (venta) o proveedor (compra). */
   contactId?: string | null | undefined
+  /** Datos fiscales escritos en la caja; si faltan, los del contacto. */
+  customer?: { name: string; taxId: string; address?: string | null | undefined } | null | undefined
+  /** Venta con factura: exige el nombre y la cédula o el RIF del cliente. */
+  invoice?: boolean | undefined
   /** Número de la factura del proveedor u otra referencia externa. */
   externalRef?: string | null | undefined
   note?: string | null | undefined
@@ -153,6 +172,8 @@ export interface PostDocumentInput {
   charges?: readonly { chargeId: string; amountMinor?: number | undefined }[] | undefined
   /** Venta que sale de una cotización abierta: queda convertida en la misma transacción. */
   quoteId?: string | null | undefined
+  /** Venta que cobra un pedido del catálogo: queda atendido en la misma transacción. */
+  webOrderId?: string | null | undefined
   /**
    * Compra, ajuste o traslado: la ubicación cuya existencia cambia (en el traslado, el origen).
    * Si falta, la de la caja. Las ventas y devoluciones mueven siempre la ubicación de su caja.
@@ -162,6 +183,15 @@ export interface PostDocumentInput {
   toLocationId?: string | null | undefined
   /** Venta con código de descuento. */
   discountCodeId?: string | null | undefined
+  /** Venta que cobra productos de una cuenta abierta (restaurante): cuánto de cada uno. */
+  tab?: { id: string; lines: readonly TabTake[] } | null | undefined
+  /**
+   * Venta: la propina que deja el cliente, en la moneda del documento. No suma al total ni lleva
+   * IVA o IGTF: los pagos la cubren además de la venta.
+   */
+  tipMinor?: number | undefined
+  /** Para quién es la propina (un usuario activo); null = para todo el equipo. */
+  tipUserId?: string | null | undefined
   /**
    * Lo pone el servidor (nunca la API): quien vende no puede dar descuentos a mano, así que los
    * descuentos de la venta no pueden pasar de lo que da su código.
@@ -184,6 +214,54 @@ export interface PostContext {
     pricesIncludeTax: boolean
     /** IVA de los productos sin uno asignado. */
     defaultTaxId: string
+  }
+  /** Sucursales donde registra quien lo hace; null o ausente, en todas. */
+  branchIds?: ReadonlySet<string> | null
+}
+
+/**
+ * Quien trabaja solo en algunas sucursales registra solo en ellas: la caja y la ubicación de la
+ * que sale lo registrado (un traslado sí puede llegar a otra sucursal).
+ */
+export function requireOwnBranch(
+  tx: Pick<Db, "select">,
+  ctx: Pick<PostContext, "branchIds">,
+  locationIds: readonly string[],
+): void {
+  const allowed = ctx.branchIds
+  if (!allowed) return
+  for (const id of new Set(locationIds)) {
+    const row = tx
+      .select({ branchId: location.branchId, name: branch.name })
+      .from(location)
+      .leftJoin(branch, eq(branch.id, location.branchId))
+      .where(eq(location.id, id))
+      .get()
+    if (row && !allowed.has(row.branchId ?? "")) {
+      throw new PostingError("OTHER_BRANCH", `No trabajas en la sucursal ${row.name ?? ""}`.trim())
+    }
+  }
+}
+
+/**
+ * En el central: lo de una sucursal con su propio servidor (sus cajas, sus ubicaciones) se
+ * registra allá, nunca aquí (los dos servidores numerarían y moverían lo mismo).
+ */
+export function requireLocalServer(tx: Pick<Db, "select">, locationIds: readonly string[]): void {
+  for (const id of new Set(locationIds)) {
+    const row = tx
+      .select({ name: branch.name })
+      .from(location)
+      .innerJoin(branch, eq(branch.id, location.branchId))
+      .innerJoin(syncPeer, eq(syncPeer.branchId, branch.id))
+      .where(eq(location.id, id))
+      .get()
+    if (row) {
+      throw new PostingError(
+        "OTHER_SERVER",
+        `La sucursal ${row.name} tiene su propio servidor: eso se registra allá`,
+      )
+    }
   }
 }
 
@@ -229,6 +307,7 @@ const LOCATION_TYPES: ReadonlySet<DocumentType> = new Set([
   "PURCHASE_RETURN",
   "ADJUSTMENT",
   "STOCK_TRANSFER",
+  "PRODUCTION",
 ])
 
 function requireActiveLocation(tx: Tx, id: string): void {
@@ -304,6 +383,10 @@ function nextNumber(tx: Tx, terminalId: string, type: DocumentType): number {
   return row.n
 }
 
+function variantName(tx: Tx, id: string): string {
+  return tx.select({ name: variant.name }).from(variant).where(eq(variant.id, id)).get()?.name ?? id
+}
+
 function applyStockMove(
   tx: Tx,
   move: { variantId: string; locationId: string; qtyMilli: number },
@@ -321,7 +404,7 @@ function applyStockMove(
   if (move.qtyMilli < 0 && row && row.qty < 0 && !ctx.allowNegativeStock) {
     throw new PostingError(
       "INSUFFICIENT_STOCK",
-      `Existencias insuficientes de ${move.variantId} (quedaría en ${row.qty / 1000})`,
+      `No alcanza la existencia de ${variantName(tx, move.variantId)} (quedaría en ${row.qty / 1000})`,
     )
   }
 }
@@ -502,7 +585,7 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
   if ((input.locationId || input.toLocationId) && !LOCATION_TYPES.has(input.type)) {
     throw new PostingError(
       "INVALID_LINE",
-      "Solo una compra (o su devolución), un ajuste o un traslado eligen la ubicación: lo demás usa la de la caja",
+      "Solo una compra (o su devolución), un ajuste, un traslado o una producción eligen la ubicación: lo demás usa la de la caja",
     )
   }
   if (input.toLocationId && input.type !== "STOCK_TRANSFER") {
@@ -510,6 +593,8 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
   }
   const locationId = input.locationId || term.locationId
   if (locationId !== term.locationId) requireActiveLocation(tx, locationId)
+  requireOwnBranch(tx, ctx, [term.locationId, locationId])
+  requireLocalServer(tx, [term.locationId, locationId])
   const toLocationId = input.type === "STOCK_TRANSFER" ? (input.toLocationId ?? null) : null
   if (toLocationId) requireActiveLocation(tx, toLocationId)
   const book = loadBook(tx)
@@ -521,6 +606,9 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
           active: contact.active,
           creditDays: contact.creditDays,
           creditLimitMinor: contact.creditLimitMinor,
+          name: contact.name,
+          taxId: contact.taxId,
+          address: contact.address,
         })
         .from(contact)
         .where(eq(contact.id, input.contactId))
@@ -588,6 +676,7 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
           .select({
             id: variant.id,
             active: variant.active,
+            productActive: product.active,
             tracksStock: product.tracksStock,
             tracksLots: product.tracksLots,
             taxId: product.taxId,
@@ -601,7 +690,9 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
     ).map((v) => [v.id, v]),
   )
   for (const id of variantIds) {
-    if (!variants.get(id)?.active) {
+    // La talla o el color desactivados, o el producto entero.
+    const v = variants.get(id)
+    if (!(v?.active && v.productActive)) {
       throw new PostingError("UNKNOWN_REFERENCE", `Variante desconocida o inactiva: ${id}`)
     }
   }
@@ -615,8 +706,14 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
     if (!variants.get(l.variantId)?.tracksLots) fail("el producto no lleva lotes")
     if (l.lot && l.lotId) fail("elige un lote existente o uno nuevo, no los dos")
     if (l.lot) {
-      if (!(input.type === "PURCHASE" || (input.type === "ADJUSTMENT" && l.qtyMilli > 0))) {
-        fail("solo una compra o una entrada de inventario traen un lote nuevo")
+      if (
+        !(
+          input.type === "PURCHASE" ||
+          input.type === "PRODUCTION" ||
+          (input.type === "ADJUSTMENT" && l.qtyMilli > 0)
+        )
+      ) {
+        fail("solo una compra, una producción o una entrada de inventario traen un lote nuevo")
       }
       if (l.lot.expiresOn !== null && !isValidDate(l.lot.expiresOn)) {
         fail("la fecha de vencimiento no es válida")
@@ -639,6 +736,7 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
   const charged =
     input.type !== "ADJUSTMENT" &&
     input.type !== "STOCK_TRANSFER" &&
+    input.type !== "PRODUCTION" &&
     !(input.type === "SALE" && fiscal.taxpayer === "none")
   const taxIdOf = (variantId: string) => variants.get(variantId)?.taxId ?? fiscal.defaultTaxId
   const taxIds = charged
@@ -919,6 +1017,57 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       throw new PostingError("QUOTE_CLOSED", `La cotización ${q.number} ya no está abierta`)
     }
   }
+  // Un pedido del catálogo se cobra una sola vez, y solo mientras no esté atendido ni descartado.
+  if (input.webOrderId) {
+    const o = tx.select().from(webOrder).where(eq(webOrder.id, input.webOrderId)).get()
+    if (input.type !== "SALE" || !o) {
+      throw new PostingError("UNKNOWN_REFERENCE", "Solo una venta cobra un pedido")
+    }
+    if (o.status !== "new") {
+      const n = `P-${String(o.number).padStart(6, "0")}`
+      throw new PostingError("ORDER_CLOSED", `El pedido ${n} ya fue atendido o descartado`)
+    }
+  }
+  const tabTaken = checkTabPayment(tx, input)
+  // La propina es de una venta y, si es para alguien, para un usuario activo.
+  const tipMinor = input.tipMinor ?? 0
+  if (input.tipUserId) {
+    if (input.type !== "SALE" || tipMinor <= 0) {
+      throw new PostingError("INVALID_PAYMENT", "Solo una venta con propina dice para quién es")
+    }
+    const who = tx
+      .select({ active: user.active })
+      .from(user)
+      .where(eq(user.id, input.tipUserId))
+      .get()
+    if (!who?.active) {
+      throw new PostingError("UNKNOWN_REFERENCE", "La propina es para alguien que no está activo")
+    }
+  }
+  // Opciones y extras: solo en ventas, y las que el producto ofrece.
+  if (input.type !== "SALE" && input.lines.some((l) => l.modifierIds?.length || l.note)) {
+    throw new PostingError("INVALID_LINE", "Solo una venta lleva opciones o indicaciones")
+  }
+  const picks =
+    input.type === "SALE" ? pickModifiers(tx, input.lines, { asOrdered: !!input.tab }) : []
+  // Platos con receta: al venderlos se gastan sus ingredientes (y de ahí sale su costo). Lo que se
+  // produce por tandas gasta los suyos al producirse.
+  const recipes =
+    input.type === "SALE"
+      ? recipesOf(tx, variantIds, false)
+      : input.type === "PRODUCTION"
+        ? recipesOf(tx, variantIds, true)
+        : new Map<string, Ingredient[]>()
+  if (input.type === "PRODUCTION") {
+    for (const id of variantIds) {
+      if (!recipes.has(id)) {
+        throw new PostingError(
+          "INVALID_LINE",
+          `${variantName(tx, id)} no tiene receta: anota sus ingredientes en su ficha`,
+        )
+      }
+    }
+  }
   // Recargos de venta: el porcentaje y el IVA salen de su configuración, nunca del cliente; el
   // monto de uno fijo lo puede cambiar quien vende (el delivery varía según la distancia).
   const chargeInputs = input.charges ?? []
@@ -1017,8 +1166,10 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       ? { amountMinor: input.amountMinor ?? 0 }
       : {}),
     ...(charges.length ? { charges } : {}),
+    ...(tipMinor ? { tipMinor } : {}),
   }
   const plan = planPosting(draft, book)
+  const convertCost = rateConverter(docRate, book)
   const discountCodeId = input.discountCodeId
     ? checkDiscountCode(tx, input, plan.lines, {
         today: localDate(ctx.now, biz.timezone),
@@ -1032,6 +1183,35 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
     plan.creditMinor > 0
       ? (explicitDue ?? (party?.creditDays ? ctx.now + party.creditDays * DAY_MS : null))
       : null
+
+  // Los datos fiscales de quien compra (o vende) quedan tal como son hoy: lo escrito en la caja,
+  // los del contacto o, en una devolución, los de la venta.
+  const customer = input.customer
+    ? {
+        name: input.customer.name.trim(),
+        taxId: normalizeTaxId(input.customer.taxId.trim()),
+        address: input.customer.address?.trim() || null,
+      }
+    : party
+      ? { name: party.name, taxId: party.taxId, address: party.address }
+      : returnOf
+        ? {
+            name: returnOf.customerName,
+            taxId: returnOf.customerTaxId,
+            address: returnOf.customerAddress,
+          }
+        : null
+  if (input.invoice) {
+    if (input.type !== "SALE") {
+      throw new PostingError("UNSUPPORTED_TYPE", "Solo una venta lleva factura")
+    }
+    if (!customer?.name || !customer.taxId) {
+      throw new PostingError(
+        "CUSTOMER_REQUIRED",
+        "Para la factura hacen falta el nombre y la cédula o el RIF del cliente",
+      )
+    }
+  }
 
   const number = formatDocumentNumber(term.code, input.type, nextNumber(tx, term.id, input.type))
   tx.insert(document)
@@ -1050,10 +1230,17 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       pricesIncludeTax: draft.pricesIncludeTax,
       shiftId,
       contactId: input.contactId ?? null,
+      customerName: customer?.name ?? null,
+      customerTaxId: customer?.taxId ?? null,
+      customerAddress: customer?.address ?? null,
+      invoiceRequested: input.invoice === true,
       returnsDocumentId: isReturn(input.type) ? (returnOf?.id ?? null) : null,
       expenseCategoryId,
       stockReasonId,
       discountCodeId,
+      tipMinor: plan.tipMinor,
+      tipLegalMinor: plan.tipLegalMinor,
+      tipUserId: plan.tipMinor > 0 ? (input.tipUserId ?? null) : null,
       discountMinor: plan.discountMinor,
       discountLegalMinor: plan.discountLegalMinor,
       creditMinor: plan.creditMinor,
@@ -1092,8 +1279,10 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
     lineIds.set(l.lineNo, id)
     // Lo que vale la mercancía que se vende o se ajusta, congelado: base de pérdidas y utilidad. Lo
     // devuelto vale lo que costó al venderse, no el costo de hoy.
-    const cost =
-      input.type === "SALE" || input.type === "ADJUSTMENT" || input.type === "STOCK_TRANSFER"
+    const recipe = recipes.get(l.variantId)
+    const cost = recipe
+      ? recipeCost(recipe, convertCost)
+      : input.type === "SALE" || input.type === "ADJUSTMENT" || input.type === "STOCK_TRANSFER"
         ? variants.get(l.variantId)
         : returnedCosts?.get(l.variantId)
     tx.insert(documentLine)
@@ -1103,6 +1292,8 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
         ...l,
         costMinor: cost?.costMinor ?? null,
         costCurrency: cost?.costMinor == null ? null : cost.costCurrency,
+        modifiers: picks[l.lineNo - 1] ?? null,
+        note: input.type === "SALE" ? input.lines[l.lineNo - 1]?.note?.trim() || null : null,
       })
       .run()
   }
@@ -1113,12 +1304,36 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       .where(eq(quote.id, input.quoteId))
       .run()
   }
+  if (input.webOrderId) {
+    tx.update(webOrder)
+      .set({
+        status: "done",
+        documentId: input.id,
+        handledBy: ctx.actorId,
+        handledAt: ctx.now,
+      })
+      .where(eq(webOrder.id, input.webOrderId))
+      .run()
+  }
+  if (input.tab && tabTaken) settleTab(tx, input.tab.id, tabTaken, input.id, ctx.now)
   for (const c of plan.charges) {
     tx.insert(documentCharge)
       .values({ id: uuidv7(ctx.now), documentId: input.id, ...c })
       .run()
   }
   if (input.type === "PURCHASE") updateLastCosts(tx, plan.lines, draft, ctx)
+  // Lo producido queda con el costo de su receta (como el último costo de una compra).
+  if (input.type === "PRODUCTION") {
+    for (const l of plan.lines) {
+      const recipe = recipes.get(l.variantId)
+      const cost = recipe && recipeCost(recipe, convertCost)
+      if (!cost) continue
+      tx.update(variant)
+        .set({ costMinor: cost.costMinor, costCurrency: cost.costCurrency })
+        .where(eq(variant.id, l.variantId))
+        .run()
+    }
+  }
 
   // Lo que cada cobro le cuesta al comercio: la cuenta recibe el pago menos esa comisión.
   const commissions = new Map<string, number>()
@@ -1256,6 +1471,42 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
           { lotId: part.lotId, locationId: m.locationId, qtyMilli: part.qtyMilli },
           ctx.allowNegativeStock,
         )
+      }
+    }
+  }
+
+  // Lo que se gasta de cada ingrediente sale de la ubicación de la venta o la producción (con lotes,
+  // del que vence primero), con la merma de la receta; queda ligado a la línea del plato.
+  for (const l of plan.lines) {
+    for (const item of recipes.get(l.variantId) ?? []) {
+      const qty = ingredientQty(l.qtyMilli, item)
+      if (qty <= 0) continue
+      const parts: LotTake[] = item.tracksLots
+        ? allocateOut(tx, item.ingredientId, locationId, qty, today, false).map((t) => ({
+            lotId: t.lotId,
+            qtyMilli: -t.qtyMilli,
+          }))
+        : [{ lotId: null, qtyMilli: -qty }]
+      for (const part of parts) {
+        const move = { variantId: item.ingredientId, locationId, qtyMilli: part.qtyMilli }
+        tx.insert(stockMove)
+          .values({
+            id: uuidv7(ctx.now),
+            documentId: input.id,
+            documentLineId: lineIds.get(l.lineNo) ?? "",
+            ...move,
+            lotId: part.lotId,
+            createdAt: ctx.now,
+          })
+          .run()
+        applyStockMove(tx, move, ctx)
+        if (part.lotId) {
+          applyLotMove(
+            tx,
+            { lotId: part.lotId, locationId, qtyMilli: part.qtyMilli },
+            ctx.allowNegativeStock,
+          )
+        }
       }
     }
   }
@@ -1425,6 +1676,8 @@ export function voidDocument(
       if (original.reversesDocumentId) {
         throw new PostingError("NOT_REVERSIBLE", "Un documento de reverso no se puede anular")
       }
+      requireOwnBranch(tx, ctx, [original.locationId])
+      requireLocalServer(tx, [original.locationId])
       const already = tx
         .select({ id: document.id })
         .from(document)
@@ -1487,9 +1740,14 @@ export function voidDocument(
         discountLegalMinor: negate(original.discountLegalMinor),
         creditMinor: negate(original.creditMinor),
         creditLegalMinor: negate(original.creditLegalMinor),
+        tipMinor: negate(original.tipMinor),
+        tipLegalMinor: negate(original.tipLegalMinor),
         // El reverso pertenece al turno en que se anula: de esa gaveta sale o entra el dinero.
         shiftId: openShiftOf(tx, original.terminalId),
         reversesDocumentId: original.id,
+        // Anular una venta con factura no pide otra factura (lo que pida la norma, la nota de
+        // crédito, queda para el adaptador fiscal).
+        invoiceRequested: false,
         note: reason,
         createdBy: ctx.actorId,
         postedAt: ctx.now,

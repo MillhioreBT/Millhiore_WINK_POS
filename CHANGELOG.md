@@ -4,7 +4,7 @@ Todos los cambios importantes de Millhiore WINK POS se anotan aquí. El formato 
 
 ## [Sin publicar]
 
-Todavía no hay una versión publicada. El proyecto está en desarrollo: las fases 1 (MVP para bodega o tienda) y 2 (paridad de gestión) están completas en el código. El detalle, con lo hecho y lo que falta, está en [PLAN.md](PLAN.md#avance-al-24-de-octubre-de-2026).
+Todavía no hay una versión publicada. El proyecto está en desarrollo: las fases 1 (MVP para bodega o tienda) y 2 (paridad de gestión) están completas en el código, y la fase 3 (ropa y restaurante) también; de la fase 4 ya están la venta por peso, la API pública con claves, los webhooks, las alertas por Telegram, HTTPS en la red local, el acceso remoto guiado, la cola offline en la caja y las sucursales (la fase 4 está completa); de la fase 5, el catálogo en línea con fotos, los pedidos por WhatsApp desde el catálogo, los plugins, las sucursales con servidor propio y la preparación de la factura. El detalle, con lo hecho y lo que falta, está en [PLAN.md](PLAN.md#avance-al-24-de-octubre-de-2026).
 
 ### Agregado
 
@@ -25,6 +25,27 @@ Todavía no hay una versión publicada. El proyecto está en desarrollo: las fas
 - Códigos de descuento (porcentaje o monto, usos máximos y vigencia) que aplica cualquier cajero.
 - Devoluciones a proveedores, con reembolso o descontadas de lo que se le debe.
 - Exposición cambiaria de las cuentas en bolívares.
+- Tallas, colores u otras características (hasta tres), cada combinación con su código, su precio y su existencia, con cuadrícula en la caja y en las compras.
+- Etiquetas con código de barras (EAN o Code 128) en rollo o en hojas adhesivas carta y A4.
+- Salas y mesas con cuentas abiertas: pedido con indicaciones, pasar o juntar mesas, precuenta y cobro total, por productos o a partes iguales; rol de mesonero.
+- Opciones y extras al vender (término, tamaño, queso extra con su precio) e indicaciones para la cocina, en la caja y en las mesas.
+- Comandas a cocina: estaciones (cocina, barra) por categoría, cada una con su impresora térmica o en la pantalla de cocina con tiempos de espera; rol de cocina.
+- Recetas con merma: al vender un plato se descuentan sus ingredientes del inventario y la venta toma su costo real.
+- Producción por tandas (salsas, panes, tortas): gasta los ingredientes de la receta, suma lo producido con su lote y le deja el costo de la receta.
+- Propina al cobrar (en % o monto, en Bs o divisas), para un mesonero o para el equipo, fuera de la venta, con su total en el cierre del turno y un informe por mesonero.
+- Venta por kilo, litro o metro (por peso o por monto), cantidad escrita en la caja, etiquetas de la balanza con el peso o el precio y balanza conectada a la PC por el puerto serie.
+- Claves de la API para conectar otros sistemas, con los permisos que se elijan, que se revocan al instante.
+- Webhooks firmados (ventas, documentos, anulaciones, turnos y tasa) con reintentos automáticos y registro de cada aviso.
+- Alertas por Telegram: resumen del día a la hora elegida, productos que llegan a su mínimo, anulaciones, cierres de turno con lo que no cuadró y tasa nueva.
+- HTTPS en la red local con una autoridad certificadora propia (limitada a la red local) y QR para conectar celulares y tablets.
+- Acceso remoto guiado con Tailscale (y HTTPS de Tailscale con un toque) o Cloudflare Tunnel, sin abrir puertos.
+- Cola offline en la caja: si se cae la red al cobrar, la venta queda guardada en el equipo y se registra sola al volver, sin duplicarse.
+- Varias sucursales contra un servidor: cada una con sus ubicaciones, cajas, turnos, lista de precios y datos en el recibo; el personal trabaja en las suyas y los informes, el historial y el inicio se ven por sucursal.
+- Catálogo en línea: fotos y descripción en cada producto y una página pública con los precios en $ y Bs, en un puerto propio que se puede publicar en internet con Tailscale Funnel sin exponer la caja.
+- Pedidos desde el catálogo: el cliente arma su pedido y lo manda por WhatsApp; llega a Ventas → Pedidos (y por Telegram y webhooks) y se cobra en la caja con un toque.
+- Plugins: se instalan subiendo un .zip en Ajustes; corren aislados (QuickJS en WebAssembly) con los permisos que se les dan, reciben eventos, llaman a la API y pueden traer una pantalla en un marco aislado. Guía en `docs/plugins.md`.
+- Sucursales con servidor propio: cada sucursal puede tener su PC, que vende sin internet y se sincroniza sola con el central por Tailscale (sube ventas, compras, inventario y turnos; baja catálogo, clientes, usuarios y ajustes). Se une con un código desde el asistente inicial. Guía en `docs/sucursales.md`.
+- Preparación de la factura: los datos fiscales del cliente quedan en cada venta; la caja puede cobrar «Con factura» (pide nombre y cédula o RIF) y en Ventas se anotan el número de la factura y el de control que asigna la máquina fiscal o el talonario, que salen en el recibo y en el libro de ventas.
 - Tasa del BCV automática, con fuentes de respaldo, carga manual e historial.
 - Usuarios con roles, PIN de cajero, sesiones activas y bitácora.
 - Respaldos automáticos y manuales, con descarga y restauración.

@@ -2,35 +2,45 @@ import { createRoute } from "@hono/zod-openapi"
 import { apiErrorSchema, type Bootstrap, bootstrapSchema } from "@millhiore/contracts"
 import {
   account,
+  branch,
   business,
   currency,
   type Db,
   discountCode,
+  location,
   paymentMethod,
   surcharge,
   tax,
   terminal,
+  user,
 } from "@millhiore/db"
-import { asc, eq, sql } from "drizzle-orm"
+import { and, asc, eq, sql } from "drizzle-orm"
 import { actorOf } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
+import { BRANCH_ORDER, type BranchScope, inBranches, MAIN_BRANCH_ID } from "../branches/service"
+import { activeModifierGroups } from "../catalog/modifiers"
 import { priceListsForPos } from "../catalog/priceLists"
 import { chargesForPos } from "../charges/routes"
 import { features } from "../features/routes"
 import { listLocations } from "../locations/routes"
 import { printerSettings } from "../printing/service"
+import { scaleSettings } from "../scale/routes"
 import {
   autoLockMinutes,
   businessProfile,
   creditEnabled,
   fiscalSettings,
 } from "../settings/service"
+import { readLink } from "../sync/link"
 
 const KIND_ORDER = { cash: 0, mobile: 1, bank: 2, wallet: 3 } as const
 
-/** Todo lo que la caja necesita para arrancar: negocio, cajas, monedas, métodos, impuestos. */
-export function bootstrap(db: Db): Bootstrap {
+/**
+ * Todo lo que la caja necesita para arrancar: negocio, cajas, monedas, métodos, impuestos. Las
+ * cajas, las de las sucursales donde trabaja quien entró.
+ */
+export function bootstrap(db: Db, branches: BranchScope = null): Bootstrap {
   const biz = db.select().from(business).get()
   if (!biz) throw new HttpError(409, "NOT_CONFIGURED", "El negocio aún no está configurado")
   const methods = db
@@ -70,12 +80,36 @@ export function bootstrap(db: Db): Bootstrap {
         code: terminal.code,
         name: terminal.name,
         locationId: terminal.locationId,
+        branchId: sql<string>`coalesce(${location.branchId}, ${MAIN_BRANCH_ID})`,
       })
       .from(terminal)
-      .where(eq(terminal.active, true))
+      .innerJoin(location, eq(location.id, terminal.locationId))
+      .where(
+        and(
+          eq(terminal.active, true),
+          inBranches(terminal.locationId, branches ? [...branches] : null),
+        ),
+      )
       .orderBy(asc(terminal.code))
       .all(),
-    locations: listLocations(db).map(({ id, name, kind }) => ({ id, name, kind })),
+    branches: db
+      .select({
+        id: branch.id,
+        name: branch.name,
+        address: branch.address,
+        phone: branch.phone,
+        priceListId: branch.priceListId,
+      })
+      .from(branch)
+      .where(eq(branch.active, true))
+      .orderBy(...BRANCH_ORDER)
+      .all(),
+    locations: listLocations(db).map(({ id, name, kind, branchId }) => ({
+      id,
+      name,
+      kind,
+      branchId,
+    })),
     discountCodes:
       db
         .select({ n: sql<number>`count(*)` })
@@ -107,6 +141,17 @@ export function bootstrap(db: Db): Bootstrap {
     fiscal: fiscalSettings(db),
     credit: { enabled: creditEnabled(db) },
     features: features(db),
+    scale: features(db).scale ? scaleSettings(db) : null,
+    // A quién puede ir una propina: solo hace falta si el negocio las usa.
+    staff: features(db).tips
+      ? db
+          .select({ id: user.id, name: user.name })
+          .from(user)
+          .where(eq(user.active, true))
+          .orderBy(asc(user.name))
+          .all()
+      : [],
+    modifierGroups: activeModifierGroups(db),
     priceLists: priceListsForPos(db),
     charges: chargesForPos(db),
     security: { autoLockMinutes: autoLockMinutes(db) },
@@ -116,6 +161,10 @@ export function bootstrap(db: Db): Bootstrap {
       autoPrint,
       openDrawer,
     }))(printerSettings(db)),
+    central: (() => {
+      const link = readLink(db)
+      return link ? { branchName: link.branchName, url: link.centralUrl } : null
+    })(),
   }
 }
 
@@ -135,7 +184,6 @@ const route = createRoute({
 
 export function registerBootstrapRoutes(app: App, deps: AppDeps): void {
   app.openapi(route, (c) => {
-    actorOf(c)
-    return c.json(bootstrap(deps.db), 200)
+    return c.json(bootstrap(deps.db, actorOf(c).branchIds), 200)
   })
 }

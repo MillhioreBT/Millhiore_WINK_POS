@@ -210,6 +210,7 @@ export function registerUserRoutes(app: App, deps: AppDeps): void {
         permissions: [...a.permissions],
         mustChangePassword: a.mustChangePassword,
         hasPin: a.hasPin,
+        branchIds: a.branchIds ? [...a.branchIds] : null,
       },
       200,
     )
@@ -259,8 +260,8 @@ export function registerUserRoutes(app: App, deps: AppDeps): void {
   })
 
   app.openapi(createRouteDef, async (c) => {
-    requirePermission(c, "user.manage")
-    const id = await createUserAccount(deps.auth, deps.db, c.req.valid("json"))
+    const actor = requirePermission(c, "user.manage")
+    const id = await createUserAccount(deps.auth, deps.db, c.req.valid("json"), actor.branchIds)
     return c.json({ id }, 201)
   })
 

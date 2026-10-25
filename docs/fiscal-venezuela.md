@@ -18,6 +18,7 @@ Cómo calcula el sistema los impuestos de una venta en Venezuela, qué reglas si
 **Facturación**
 - En agosto de 2026, la Providencia SNAT/2026/00084 (G.O. 43.435) derogó la que exigía software de facturación homologado (SNAT/2024/000121). Todavía no hay un régimen que la reemplace.
 - La obligación de emitir factura sigue vigente. El recibo de este sistema **no es una factura fiscal**: eso le toca al adaptador fiscal de la fase 5.
+- En octubre de 2026, la Providencia SNAT/2026/00093 (G.O. 43.484) dejó facturar por medios digitales (el portal y la app del SENIAT, imprentas digitales u otros proveedores autorizados) o con máquina fiscal, a elección del contribuyente, a partir de los 180 días (hacia abril de 2027). Todavía no hay especificación técnica de los medios digitales.
 
 ## Cómo lo modela el sistema
 
@@ -47,12 +48,23 @@ El documento guarda la alícuota que aplicó cada línea y el desglose por alíc
 4. **La base del IGTF incluye el IVA** cuando el cliente paga el total en divisas. Gálac lo calcula así (116 → 3,48); otros lo calculan sin IVA. No hay aclaración oficial.
 5. Las compras no llevan IGTF: lo percibe quien vende. Quien no cobra IVA (`taxpayer: none`) vende sin impuesto, pero sus compras sí lo traen.
 
+## Lo que ya está preparado para la factura
+
+Mientras sale la norma técnica, el sistema deja listo lo que no depende de ella:
+
+- **Los datos fiscales del cliente quedan en cada documento** tal como eran al registrarse: nombre o razón social, cédula o RIF y dirección. Vienen del contacto o se escriben en la caja sin guardar al cliente. Cambiar el contacto después no cambia ni el recibo ni el libro.
+- **Venta con factura o nota de venta.** Con «Doy facturas con máquina fiscal o talonario» (Ajustes → Impuestos), la caja ofrece «Con factura» y exige el nombre y la cédula o el RIF. Sin marcar, la venta sale como nota de venta, como antes.
+- **Número de factura y número de control.** Los asigna el medio autorizado (la máquina fiscal, el talonario de forma libre de una imprenta autorizada o, desde 2027, el medio digital), nunca este sistema. Se anotan en Ventas → «Facturas por anotar» y salen en el recibo y en el libro de ventas. El número de control no se repite, y cambiarlo pide poder anular ventas.
+
+Lo que falta depende de la norma técnica: emitir la factura por el medio digital (o por la máquina fiscal) y anotar sus números solo, las notas de crédito y de débito, y el formato del libro de ventas.
+
 ## Pendiente de validar con un contador
 
 - Base del IGTF con o sin IVA (regla 4). Si cambia, hace falta una opción más.
 - Retenciones de IVA (75 % o 100 %) e ISLR que practican los sujetos pasivos especiales en sus compras. Aún no están modeladas y entran con cuentas por pagar.
 - Exenciones vigentes por producto. El sistema trae "Exento", pero cada negocio decide qué productos lo llevan.
-- Requisitos de la factura fiscal y del libro de ventas (fase 5), según el régimen que sustituya a la SNAT/2024/000121.
+- Requisitos de la factura fiscal y del libro de ventas, según la norma técnica de la SNAT/2026/00093.
+- Si una venta anulada después de facturada necesita una nota de crédito aparte (hoy la anulación no pide otra factura).
 
 ## Fuentes
 

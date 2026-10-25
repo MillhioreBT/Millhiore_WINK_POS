@@ -401,6 +401,74 @@ describe("planPosting · traslados de inventario", () => {
   })
 })
 
+describe("planPosting · propina", () => {
+  test("los pagos cubren la venta, su IGTF y la propina, que no paga IGTF ni suma al total", () => {
+    // 116,00 $ pagados en divisas con 10,00 $ de propina: IGTF sobre 116,00 $ (3,48 $).
+    const plan = planPosting(
+      sale({
+        lines: [ln(1000, 11600, { tax: IVA })],
+        payments: [{ ...pay("p1", "USD", 12948), surcharge: IGTF }],
+        tipMinor: 1000,
+      }),
+      book,
+    )
+    expect(plan.totalMinor).toBe(11600)
+    expect(plan.surchargeMinor).toBe(348)
+    expect(plan.surcharges[0]?.baseMinor).toBe(11600)
+    expect(plan).toMatchObject({ tipMinor: 1000, tipLegalMinor: 36500 })
+    expect(plan.accountMoves.map((m) => m.amountMinor)).toEqual([12948])
+  })
+
+  test("sin cubrir la propina no cuadra; solo una venta la lleva", () => {
+    expect(codeOf(() => planPosting(sale({ tipMinor: 100 }), book))).toBe("UNSETTLED")
+    expect(codeOf(() => planPosting(sale({ tipMinor: -1 }), book))).toBe("INVALID_PAYMENT")
+    expect(
+      codeOf(() =>
+        planPosting(
+          sale({ type: "PURCHASE", payments: [pay("p1", "USD", 1100)], tipMinor: 100 }),
+          book,
+        ),
+      ),
+    ).toBe("INVALID_PAYMENT")
+    expect(planPosting(sale(), book)).toMatchObject({ tipMinor: 0, tipLegalMinor: 0 })
+  })
+})
+
+describe("planPosting · producción por tandas", () => {
+  const production = (over: Partial<DocumentDraft> = {}) =>
+    sale({
+      type: "PRODUCTION",
+      payments: [],
+      lines: [ln(12_000, 0)],
+      locationId: "cocina",
+      ...over,
+    })
+
+  test("lo producido entra a la ubicación, sin dinero ni total", () => {
+    const plan = planPosting(production(), book)
+    expect(plan.stockMoves).toEqual([
+      { lineNo: 1, variantId: "v1", locationId: "cocina", qtyMilli: 12_000 },
+    ])
+    expect(plan).toMatchObject({ totalMinor: 0, totalLegalMinor: 0, taxes: [], accountMoves: [] })
+  })
+
+  test("rechaza cantidades no positivas, precios, servicios y pagos", () => {
+    expect(codeOf(() => planPosting(production({ lines: [ln(-1000, 0)] }), book))).toBe(
+      "INVALID_LINE",
+    )
+    expect(codeOf(() => planPosting(production({ lines: [ln(1000, 10)] }), book))).toBe(
+      "INVALID_LINE",
+    )
+    expect(
+      codeOf(() => planPosting(production({ lines: [ln(1000, 0, { tracksStock: false })] }), book)),
+    ).toBe("INVALID_LINE")
+    expect(codeOf(() => planPosting(production({ lines: [] }), book))).toBe("EMPTY_DOCUMENT")
+    expect(codeOf(() => planPosting(production({ payments: [pay("p", "USD", 1)] }), book))).toBe(
+      "INVALID_PAYMENT",
+    )
+  })
+})
+
 describe("planPosting · PURCHASE y ADJUSTMENT", () => {
   test("la compra suma stock y saca dinero", () => {
     const plan = planPosting(sale({ type: "PURCHASE" }), book)

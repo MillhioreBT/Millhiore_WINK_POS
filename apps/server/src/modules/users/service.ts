@@ -4,12 +4,25 @@ import { passwordProblem, uuidv7 } from "@millhiore/domain"
 import { and, eq, ne } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
 import { type Auth, hashPassword, syntheticEmail, verifyPassword } from "../../infra/auth"
+import { type BranchScope, branchesByUser, setUserBranches } from "../branches/service"
 
 export interface NewUser {
   name: string
   username: string
   password: string
   roleId: string
+  /** Sucursales donde trabaja; null o vacío, en todas. */
+  branchIds?: string[] | null | undefined
+}
+
+/**
+ * Quien trabaja solo en algunas sucursales reparte solo esas: no da «todas» ni una ajena.
+ */
+function checkBranchGrant(actorScope: BranchScope, branchIds: readonly string[] | null): void {
+  if (!actorScope) return
+  if (!branchIds?.length || branchIds.some((id) => !actorScope.has(id))) {
+    throw new HttpError(403, "OTHER_BRANCH", "Solo puedes asignar las sucursales donde trabajas")
+  }
 }
 
 /** El rol de fábrica con todos los permisos. Solo otro dueño puede tocar la cuenta de un dueño. */
@@ -48,9 +61,18 @@ function audit(db: Pick<Db, "insert">, actorId: string | null, action: string, u
  * Crea un usuario con su rol. El registro público de Better Auth está cerrado, así que esta es
  * la única vía. Devuelve el id del usuario.
  */
-export async function createUserAccount(auth: Auth, db: Db, input: NewUser): Promise<string> {
+export async function createUserAccount(
+  auth: Auth,
+  db: Db,
+  input: NewUser,
+  actorScope: BranchScope = null,
+): Promise<string> {
   if (!db.select().from(role).where(eq(role.id, input.roleId)).get()) {
     throw new HttpError(422, "UNKNOWN_ROLE", `Rol desconocido: ${input.roleId}`)
+  }
+  checkBranchGrant(actorScope, input.branchIds ?? null)
+  if (input.branchIds?.length && input.roleId === OWNER_ROLE) {
+    throw new HttpError(422, "OWNER_ALL_BRANCHES", "Un dueño trabaja en todas las sucursales")
   }
   if (db.select().from(user).where(eq(user.username, input.username)).get()) {
     throw new HttpError(409, "USERNAME_TAKEN", `El usuario ${input.username} ya existe`)
@@ -65,10 +87,12 @@ export async function createUserAccount(auth: Auth, db: Db, input: NewUser): Pro
     },
   })
   db.update(user).set({ roleId: input.roleId }).where(eq(user.id, created.user.id)).run()
+  if (input.branchIds?.length) setUserBranches(db, created.user.id, input.branchIds)
   return created.user.id
 }
 
 export function listUsers(db: Db): UserRow[] {
+  const branches = branchesByUser(db)
   return db
     .select({
       id: user.id,
@@ -80,6 +104,7 @@ export function listUsers(db: Db): UserRow[] {
     })
     .from(user)
     .all()
+    .map((u) => ({ ...u, branchIds: branches.get(u.id) ?? null }))
 }
 
 function findUser(db: Db, id: string) {
@@ -215,7 +240,7 @@ export async function resetUserPassword(
 /** Cambia nombre, rol o estado. Nunca deja el negocio sin un dueño activo. */
 export function updateUser(
   db: Db,
-  actor: { userId: string; roleId: string | null },
+  actor: { userId: string; roleId: string | null; branchIds?: BranchScope },
   targetId: string,
   patch: UpdateUserBody,
 ): UserRow {
@@ -234,6 +259,15 @@ export function updateUser(
   }
   if (patch.active === false && targetId === actor.userId) {
     throw new HttpError(409, "OWN_ACCOUNT", "No puedes desactivar tu propia cuenta")
+  }
+  const willBeOwner = (patch.roleId ?? target.roleId) === OWNER_ROLE
+  if (patch.branchIds?.length && willBeOwner) {
+    throw new HttpError(422, "OWNER_ALL_BRANCHES", "Un dueño trabaja en todas las sucursales")
+  }
+  if (patch.branchIds !== undefined || (willBeOwner && target.roleId !== OWNER_ROLE)) {
+    checkBranchGrant(actor.branchIds ?? null, patch.branchIds ?? null)
+    setUserBranches(db, targetId, patch.branchIds ?? null)
+    audit(db, actor.userId, "user.branches.updated", targetId)
   }
   const losesOwner =
     target.roleId === OWNER_ROLE &&

@@ -14,12 +14,13 @@ import {
   updateLocationSchema,
   updateTerminalSchema,
 } from "@millhiore/contracts"
-import { auditLog, business, cashShift, type Db, location, terminal } from "@millhiore/db"
+import { auditLog, branch, business, cashShift, type Db, location, terminal } from "@millhiore/db"
 import { uuidv7 } from "@millhiore/domain"
 import { and, asc, eq, sql } from "drizzle-orm"
 import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
+import { MAIN_BRANCH_ID } from "../branches/service"
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0]
 type Reader = Pick<Db, "select">
@@ -35,6 +36,8 @@ const locationColumns = {
   name: location.name,
   kind: location.kind,
   active: location.active,
+  branchId: sql<string>`coalesce(${location.branchId}, ${MAIN_BRANCH_ID})`,
+  branchName: sql<string>`coalesce(${branch.name}, '')`,
   // Nombres explícitos: en una consulta de una sola tabla drizzle no califica las columnas.
   productsInStock: sql<number>`(select count(*) from "stock_balance" as "b"
     where "b"."location_id" = "location"."id" and "b"."qty_milli" <> 0)`,
@@ -51,13 +54,19 @@ export function listLocations(db: Reader, opts: { all?: boolean } = {}): StockLo
     db
       .select(locationColumns)
       .from(location)
+      .leftJoin(branch, eq(branch.id, location.branchId))
       .where(opts.all ? undefined : eq(location.active, true))
       .all(),
   )
 }
 
 function locationById(db: Reader, id: string): StockLocation {
-  const row = db.select(locationColumns).from(location).where(eq(location.id, id)).get()
+  const row = db
+    .select(locationColumns)
+    .from(location)
+    .leftJoin(branch, eq(branch.id, location.branchId))
+    .where(eq(location.id, id))
+    .get()
   if (!row) throw new HttpError(404, "NOT_FOUND", `No existe la ubicación ${id}`)
   return row
 }
@@ -74,6 +83,12 @@ function audit(
   tx.insert(auditLog)
     .values({ id: uuidv7(now), at: now, actorId, action, entityType, entityId: id, data })
     .run()
+}
+
+function requireActiveBranch(tx: Tx, id: string): void {
+  const row = tx.select({ active: branch.active }).from(branch).where(eq(branch.id, id)).get()
+  if (!row?.active)
+    throw new HttpError(422, "UNKNOWN_BRANCH", `Sucursal desconocida o inactiva: ${id}`)
 }
 
 /** Dos ubicaciones con el mismo nombre (sin importar mayúsculas) confundirían los traslados. */
@@ -98,9 +113,11 @@ export function createLocation(
       const biz = tx.select({ id: business.id }).from(business).get()
       if (!biz) throw new HttpError(409, "NOT_SET_UP", "El negocio no está configurado")
       requireFreeName(tx, input.name)
+      const branchId = input.branchId ?? MAIN_BRANCH_ID
+      requireActiveBranch(tx, branchId)
       const id = uuidv7(now)
       tx.insert(location)
-        .values({ id, businessId: biz.id, name: input.name, kind: input.kind })
+        .values({ id, businessId: biz.id, branchId, name: input.name, kind: input.kind })
         .run()
       const created = locationById(tx, id)
       audit(tx, actorId, now, "location.created", "location", id, created)
@@ -121,6 +138,23 @@ export function updateLocation(
     (tx) => {
       const before = locationById(tx, id)
       if (patch.name !== undefined) requireFreeName(tx, patch.name, id)
+      const movesBranch = patch.branchId !== undefined && patch.branchId !== before.branchId
+      if (movesBranch) {
+        requireActiveBranch(tx, patch.branchId as string)
+        // Lo vendido y lo contado en ella ya cuenta para su sucursal: con existencia o cajas, no.
+        const till = tx
+          .select({ name: terminal.name })
+          .from(terminal)
+          .where(and(eq(terminal.locationId, id), eq(terminal.active, true)))
+          .get()
+        if (till || before.productsInStock > 0) {
+          throw new HttpError(
+            409,
+            "LOCATION_IN_USE",
+            `«${before.name}» ya tiene ${till ? "cajas" : "existencia"}: crea una ubicación nueva en la otra sucursal`,
+          )
+        }
+      }
       if (patch.active === false && before.active) {
         const till = tx
           .select({ name: terminal.name })
@@ -146,6 +180,7 @@ export function updateLocation(
         ...(patch.name !== undefined ? { name: patch.name } : {}),
         ...(patch.kind !== undefined ? { kind: patch.kind } : {}),
         ...(patch.active !== undefined ? { active: patch.active } : {}),
+        ...(movesBranch ? { branchId: patch.branchId } : {}),
       }
       if (Object.keys(set).length) tx.update(location).set(set).where(eq(location.id, id)).run()
       const after = locationById(tx, id)
@@ -162,6 +197,8 @@ const terminalColumns = {
   name: terminal.name,
   locationId: terminal.locationId,
   locationName: location.name,
+  branchId: sql<string>`coalesce(${location.branchId}, ${MAIN_BRANCH_ID})`,
+  branchName: sql<string>`coalesce(${branch.name}, '')`,
   active: terminal.active,
   shiftOpen: sql<boolean>`exists (select 1 from ${cashShift}
     where ${cashShift.terminalId} = ${terminal.id} and ${cashShift.status} = 'open')`.mapWith(
@@ -174,6 +211,7 @@ export function listTerminals(db: Reader, opts: { all?: boolean } = {}): Termina
     .select(terminalColumns)
     .from(terminal)
     .innerJoin(location, eq(location.id, terminal.locationId))
+    .leftJoin(branch, eq(branch.id, location.branchId))
     .where(opts.all ? undefined : eq(terminal.active, true))
     .orderBy(asc(terminal.code))
     .all()
@@ -184,6 +222,7 @@ function terminalById(db: Reader, id: string): TerminalInfo {
     .select(terminalColumns)
     .from(terminal)
     .innerJoin(location, eq(location.id, terminal.locationId))
+    .leftJoin(branch, eq(branch.id, location.branchId))
     .where(eq(terminal.id, id))
     .get()
   if (!row) throw new HttpError(404, "NOT_FOUND", `No existe la caja ${id}`)

@@ -9,13 +9,17 @@ import {
   salesReportSchema,
   taxBookQuerySchema,
   taxBookSchema,
+  tipsReportSchema,
 } from "@millhiore/contracts"
 import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
+import { requireOwnBranch } from "../../posting/post"
+import { branchesFor } from "../branches/service"
 import { inventoryReport, resultsReport, salesReport } from "./period"
 import { daySummary } from "./service"
 import { taxBook } from "./taxBook"
+import { tipsReport } from "./tips"
 
 const err = { content: { "application/json": { schema: apiErrorSchema } } }
 
@@ -26,7 +30,9 @@ const dayRoute = createRoute({
   summary: "Resumen del día",
   description:
     "Ventas netas, cobrado por método, ventas por hora, lo más vendido, compras, turnos abiertos y productos por reponer. El día se cuenta en la zona horaria del negocio.",
-  request: { query: z.object({ date: dateSchema.optional() }) },
+  request: {
+    query: z.object({ date: dateSchema.optional(), branchId: z.string().min(1).optional() }),
+  },
   responses: {
     200: { description: "Resumen", content: { "application/json": { schema: daySummarySchema } } },
     403: { description: "Falta report.view", ...err },
@@ -70,6 +76,20 @@ const salesRoute = createRoute({
   },
 })
 
+const tipsRoute = createRoute({
+  method: "get",
+  path: "/api/reports/tips",
+  tags: ["Informes"],
+  summary: "Propinas de un período por mesonero",
+  description:
+    "Lo que dejaron los clientes de propina, por quien la recibe (o para todo el equipo), neto de anulaciones, en moneda legal y en la de referencia a la tasa de cada venta.",
+  request: { query: reportRangeQuerySchema },
+  responses: {
+    200: { description: "Propinas", content: { "application/json": { schema: tipsReportSchema } } },
+    ...rangeResponses,
+  },
+})
+
 const taxBookRoute = createRoute({
   method: "get",
   path: "/api/reports/tax-book",
@@ -91,7 +111,12 @@ const inventoryRoute = createRoute({
   summary: "Inventario valorado",
   description:
     "Existencia, costo y valor de cada producto que lleva inventario, a costo y a precio de venta, en moneda legal a la tasa vigente. Con `locationId`, solo lo que hay en esa ubicación.",
-  request: { query: z.object({ locationId: z.string().min(1).optional() }) },
+  request: {
+    query: z.object({
+      locationId: z.string().min(1).optional(),
+      branchId: z.string().min(1).optional(),
+    }),
+  },
   responses: {
     200: {
       description: "Inventario",
@@ -112,29 +137,40 @@ const checkRange = (from: number, to: number) => {
 export function registerReportRoutes(app: App, deps: AppDeps): void {
   app.openapi(resultsRoute, (c) => {
     const actor = requirePermission(c, "report.view")
-    const { from, to } = c.req.valid("query")
+    const { from, to, branchId } = c.req.valid("query")
     checkRange(from, to)
+    const branchIds = branchesFor(actor.branchIds, branchId)
     return c.json(
-      resultsReport(deps.db, { from, to, seeCost: actor.permissions.has("cost.view") }),
+      resultsReport(deps.db, { from, to, seeCost: actor.permissions.has("cost.view"), branchIds }),
       200,
     )
   })
 
   app.openapi(salesRoute, (c) => {
     const actor = requirePermission(c, "report.view")
-    const { from, to } = c.req.valid("query")
+    const { from, to, branchId } = c.req.valid("query")
     checkRange(from, to)
+    const branchIds = branchesFor(actor.branchIds, branchId)
     return c.json(
-      salesReport(deps.db, { from, to, seeCost: actor.permissions.has("cost.view") }),
+      salesReport(deps.db, { from, to, seeCost: actor.permissions.has("cost.view"), branchIds }),
       200,
     )
   })
 
-  app.openapi(taxBookRoute, (c) => {
-    requirePermission(c, "report.view")
-    const { from, to, kind } = c.req.valid("query")
+  app.openapi(tipsRoute, (c) => {
+    const actor = requirePermission(c, "report.view")
+    const { from, to, branchId } = c.req.valid("query")
     checkRange(from, to)
-    return c.json(taxBook(deps.db, { kind, from, to }), 200)
+    const branchIds = branchesFor(actor.branchIds, branchId)
+    return c.json(tipsReport(deps.db, { from, to, branchIds }), 200)
+  })
+
+  app.openapi(taxBookRoute, (c) => {
+    const actor = requirePermission(c, "report.view")
+    const { from, to, kind, branchId } = c.req.valid("query")
+    checkRange(from, to)
+    const branchIds = branchesFor(actor.branchIds, branchId)
+    return c.json(taxBook(deps.db, { kind, from, to, branchIds }), 200)
   })
 
   app.openapi(inventoryRoute, (c) => {
@@ -142,11 +178,14 @@ export function registerReportRoutes(app: App, deps: AppDeps): void {
     if (!(actor.permissions.has("report.view") || actor.permissions.has("inventory.view"))) {
       throw new HttpError(403, "FORBIDDEN", "Falta el permiso report.view")
     }
+    const { locationId } = c.req.valid("query")
+    if (locationId) requireOwnBranch(deps.db, actor, [locationId])
     return c.json(
       inventoryReport(deps.db, {
         now: deps.now(),
         seeCost: actor.permissions.has("cost.view"),
         locationId: c.req.valid("query").locationId,
+        branchIds: branchesFor(actor.branchIds, c.req.valid("query").branchId),
       }),
       200,
     )
@@ -160,6 +199,7 @@ export function registerReportRoutes(app: App, deps: AppDeps): void {
         now: deps.now(),
         includeStock: actor.permissions.has("inventory.view"),
         seeCost: actor.permissions.has("cost.view"),
+        branchIds: branchesFor(actor.branchIds, c.req.valid("query").branchId),
       }),
       200,
     )

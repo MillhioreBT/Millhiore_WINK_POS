@@ -1,4 +1,9 @@
-import type { Bootstrap, PaymentMethodInfo, SaleChargeInfo } from "@millhiore/contracts"
+import type {
+  Bootstrap,
+  PaymentMethodInfo,
+  PickedModifier,
+  SaleChargeInfo,
+} from "@millhiore/contracts"
 import {
   type CurrencyBook,
   computeSurcharges,
@@ -15,6 +20,7 @@ import {
   type PriceListRule,
   planCharges,
   priceInList,
+  qtyForAmount,
   roundToInteger,
   type SurchargeGroup,
   settle,
@@ -120,6 +126,25 @@ export function unitPriceInDoc(
   return convertMinor(ctx, priceMinor, priceCurrency, ctx.docCurrency)
 }
 
+/**
+ * Precio unitario en la moneda del documento con las opciones y extras, que suman su precio (cada
+ * uno en su moneda) al del producto; null si falta la tasa para alguno.
+ */
+export function unitWithModifiers(
+  ctx: PosContext,
+  priceMinor: number,
+  priceCurrency: string,
+  modifiers: readonly PickedModifier[] | undefined,
+): number | null {
+  let unit = unitPriceInDoc(ctx, priceMinor, priceCurrency)
+  for (const m of modifiers ?? []) {
+    if (!m.priceMinor || !m.priceCurrency || unit === null) continue
+    const extra = unitPriceInDoc(ctx, m.priceMinor, m.priceCurrency)
+    unit = extra === null ? null : unit + extra
+  }
+  return unit
+}
+
 /** IVA que el servidor aplicará a la línea (mismo criterio que posting/post.ts). */
 export function lineTaxOf(ctx: PosContext, taxId: string | null): LineTax | null {
   if (ctx.fiscal.taxpayer === "none") return null
@@ -142,6 +167,8 @@ export interface DiscountCodeRef {
 }
 
 export interface CartLine {
+  /** Identifica la línea en el ticket (el producto, o uno propio si lleva opciones). */
+  key?: string | undefined
   variantId: string
   name: string
   qtyMilli: number
@@ -151,6 +178,15 @@ export interface CartLine {
   discountMinor?: number
   /** IVA del producto (null = el impuesto por defecto). */
   taxId: string | null
+  /** Opciones y extras elegidos (su precio ya va en `unitPriceMinor`). */
+  modifiers?: readonly PickedModifier[] | undefined
+  /** Indicaciones para la cocina. */
+  note?: string | null | undefined
+}
+
+/** La clave de una línea del ticket: la suya, o el producto si no lleva opciones. */
+export function lineKey(l: { key?: string | undefined; variantId: string }): string {
+  return l.key ?? l.variantId
 }
 
 export interface Ticket {
@@ -164,6 +200,8 @@ export interface Ticket {
   totalMinor: number
   /** Σ IVA (para mostrar). */
   taxMinor: number
+  /** Propina que se cobra con la venta (aparte del total, sin IVA ni IGTF); la pone el cobro. */
+  tipMinor?: number
 }
 
 const identity = (n: number) => n
@@ -244,7 +282,7 @@ export interface CreditEntry {
 export interface Checkout {
   surcharges: SurchargeGroup[]
   surchargeMinor: number
-  /** Total + recargos: lo que hay que cobrar. */
+  /** Total + recargos + propina: lo que hay que cobrar. */
   dueMinor: number
   /** Lo fiado visto en la moneda del documento (redondeado); 0 si no hay. */
   creditDocMinor: number
@@ -290,7 +328,7 @@ export function computeCheckout(
     identity,
   )
   const surchargeMinor = surcharges.reduce((acc, s) => acc + s.amountMinor, 0)
-  const dueMinor = ticket.totalMinor + surchargeMinor
+  const dueMinor = ticket.totalMinor + surchargeMinor + (ticket.tipMinor ?? 0)
   const s = settle(ctx.docCurrency, dueMinor, owed ? [...forSettle, owed] : forSettle, ctx.book)
   return {
     surcharges,
@@ -445,6 +483,22 @@ export function draftCharges(
   return { charges, missingRate }
 }
 
+/**
+ * Cuánto lleva un monto (en bolívares o en la moneda de referencia) al precio por unidad del
+ * ticket, en milésimas; null si no se puede convertir o el monto no alcanza para nada.
+ */
+export function qtyForMoney(
+  ctx: PosContext,
+  amount: { minor: number; currency: string },
+  unitPriceMinor: number | null,
+): number | null {
+  if (unitPriceMinor === null) return null
+  const inDoc = convertMinor(ctx, amount.minor, amount.currency, ctx.docCurrency)
+  if (inDoc === null) return null
+  const qty = qtyForAmount(inDoc, unitPriceMinor)
+  return qty && qty > 0 ? qty : null
+}
+
 /** Línea del ticket tal como se guarda en la caja: precio de catálogo y descuento elegido. */
 export interface StoredLine {
   variantId: string
@@ -456,6 +510,9 @@ export interface StoredLine {
   discount?: DiscountSpec | undefined
   /** Precio congelado (de una cotización): no le aplica la lista de precios. */
   fixedPrice?: boolean | undefined
+  key?: string | undefined
+  modifiers?: readonly PickedModifier[] | undefined
+  note?: string | null | undefined
 }
 
 /**
@@ -476,7 +533,7 @@ export function buildCart(
   let missingRate = charges.missingRate
   const base = stored.map((l) => {
     const price = l.fixedPrice ? l : priceWithList(ctx, priceListId, l.variantId, l)
-    const unit = unitPriceInDoc(ctx, price.priceMinor, price.priceCurrency)
+    const unit = unitWithModifiers(ctx, price.priceMinor, price.priceCurrency, l.modifiers)
     if (unit === null) missingRate = true
     const unitPriceMinor = unit ?? 0
     const gross = lineTotal(l.qtyMilli, unitPriceMinor)
@@ -496,12 +553,15 @@ export function buildCart(
     rest = 0
   }
   const lines: CartLine[] = base.map((b, i) => ({
+    key: lineKey(b.l),
     variantId: b.l.variantId,
     name: b.l.name,
     qtyMilli: b.l.qtyMilli,
     unitPriceMinor: b.unitPriceMinor,
     discountMinor: b.own + (shares[i] ?? 0),
     taxId: b.l.taxId,
+    ...(b.l.modifiers?.length ? { modifiers: b.l.modifiers } : {}),
+    ...(b.l.note ? { note: b.l.note } : {}),
   }))
   return { lines, ticket: computeTicket(ctx, lines, charges.charges), missingRate }
 }

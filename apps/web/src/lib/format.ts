@@ -1,3 +1,5 @@
+import type { ProductUnit } from "@millhiore/contracts"
+
 const SYMBOLS: Record<string, string> = { USD: "$", VES: "Bs", EUR: "€", USDT: "USDT" }
 
 const numberFormats = new Map<number, Intl.NumberFormat>()
@@ -32,6 +34,28 @@ export function formatQty(milli: number): string {
   return new Intl.NumberFormat("es-VE", { maximumFractionDigits: 3 }).format(milli / 1000)
 }
 
+const UNIT_SYMBOLS: Record<ProductUnit, string> = { unit: "", kg: "kg", l: "l", m: "m" }
+
+/** Cómo se llama cada forma de vender, para elegirla en el producto. */
+export const UNIT_NAMES: Record<ProductUnit, string> = {
+  unit: "Unidad",
+  kg: "Kilo (kg)",
+  l: "Litro (l)",
+  m: "Metro (m)",
+}
+
+/** Milésimas con su unidad: "0,350 kg" (el kilo, siempre con sus gramos), "1,5 l" o "2". */
+export function formatQtyUnit(milli: number, unit: ProductUnit | null | undefined): string {
+  if (!unit || unit === "unit") return formatQty(milli)
+  const n = unit === "kg" ? numberFormat(3).format(milli / 1000) : formatQty(milli)
+  return `${n} ${UNIT_SYMBOLS[unit]}`
+}
+
+/** "/kg" detrás de un precio por kilo, litro o metro; nada si es por unidad. */
+export function perUnit(unit: ProductUnit | null | undefined): string {
+  return !unit || unit === "unit" ? "" : `/${UNIT_SYMBOLS[unit]}`
+}
+
 /** "877.90230000" → "877,9023" */
 export function formatRate(value: string): string {
   const [int = "0", dec = ""] = value.split(".")
@@ -61,6 +85,16 @@ const timeOnly = new Intl.DateTimeFormat("es-VE", {
   timeZone: "America/Caracas",
   timeStyle: "short",
 })
+
+/** «hace un momento», «hace 5 min», «hace 3 h», «hace 2 días». */
+export function timeAgo(ms: number, now = Date.now()): string {
+  const min = Math.max(0, Math.round((now - ms) / 60_000))
+  if (min < 1) return "hace un momento"
+  if (min < 60) return `hace ${min} min`
+  if (min < 60 * 24) return `hace ${Math.round(min / 60)} h`
+  const days = Math.round(min / (60 * 24))
+  return `hace ${days} ${days === 1 ? "día" : "días"}`
+}
 
 export function formatDateTime(ms: number): string {
   return dateTime.format(ms)

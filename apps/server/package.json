@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@hono/zod-openapi": "1.6.3",
+    "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
     "@millhiore/bcv": "workspace:*",
     "@millhiore/contracts": "workspace:*",
     "@millhiore/db": "workspace:*",
@@ -21,7 +22,9 @@
     "better-auth": "1.7.8",
     "croner": "10.0.1",
     "drizzle-orm": "0.45.4",
+    "fflate": "0.8.3",
     "hono": "4.13.13",
+    "quickjs-emscripten-core": "0.32.0",
     "zod": "4.6.7"
   },
   "devDependencies": {

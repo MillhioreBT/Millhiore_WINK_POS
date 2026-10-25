@@ -35,16 +35,22 @@ interface Line {
 export function NewTransferDialog({
   boot,
   locations,
+  origins = locations,
   terminalId,
   defaultFrom,
   onClose,
 }: {
   boot: Bootstrap
+  /** Adónde puede ir (con sucursales, a cualquiera). */
   locations: Bootstrap["locations"]
+  /** De dónde puede salir (las ubicaciones de las sucursales donde se trabaja). */
+  origins?: Bootstrap["locations"]
   terminalId: string
   defaultFrom: string
   onClose: () => void
 }) {
+  // Con sucursales, el destino se elige agrupado por sucursal.
+  const branches = boot.features.branches && boot.branches.length > 1 ? boot.branches : null
   const products = useQuery(productsQuery())
   const [from, setFrom] = useState(defaultFrom)
   const [to, setTo] = useState(() => locations.find((l) => l.id !== defaultFrom)?.id ?? "")
@@ -86,9 +92,14 @@ export function NewTransferDialog({
 
   // Al elegir como origen lo que era el destino, se intercambian.
   const pickFrom = (id: string) => {
-    if (id === to) setTo(from)
+    if (id === to) setTo(origins.some((l) => l.id === from) ? from : "")
     setFrom(id)
   }
+  const destination = (l: Bootstrap["locations"][number]) => (
+    <option key={l.id} value={l.id}>
+      {l.name}
+    </option>
+  )
 
   const submit = async () => {
     if (!valid) return
@@ -141,7 +152,7 @@ export function NewTransferDialog({
         <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-end gap-2">
           <Field label="Desde" htmlFor="tr-from">
             <NativeSelect id="tr-from" value={from} onChange={(e) => pickFrom(e.target.value)}>
-              {locations.map((l) => (
+              {origins.map((l) => (
                 <option key={l.id} value={l.id}>
                   {l.name}
                 </option>
@@ -151,13 +162,16 @@ export function NewTransferDialog({
           <ArrowRightIcon className="mb-2.5 size-4 text-muted-foreground" aria-hidden />
           <Field label="Hasta" htmlFor="tr-to">
             <NativeSelect id="tr-to" value={to} onChange={(e) => setTo(e.target.value)}>
-              {locations
-                .filter((l) => l.id !== from)
-                .map((l) => (
-                  <option key={l.id} value={l.id}>
-                    {l.name}
-                  </option>
-                ))}
+              {branches
+                ? branches.map((b) => {
+                    const here = locations.filter((l) => l.id !== from && l.branchId === b.id)
+                    return here.length ? (
+                      <optgroup key={b.id} label={b.name}>
+                        {here.map(destination)}
+                      </optgroup>
+                    ) : null
+                  })
+                : locations.filter((l) => l.id !== from).map(destination)}
             </NativeSelect>
           </Field>
         </div>

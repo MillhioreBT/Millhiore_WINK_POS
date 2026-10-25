@@ -1,9 +1,20 @@
-import { Button, Field, Input, Tabs, TabsContent, TabsList, TabsTrigger } from "@millhiore/ui"
+import {
+  Button,
+  Field,
+  Input,
+  NativeSelect,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
 import { MessageCircleIcon } from "lucide-react"
 import { useState } from "react"
+import { useBranchChoices } from "../../lib/branches"
 import { dayRange, daysBefore, todayInCaracas } from "../../lib/days"
 import { bootstrapQuery } from "../../lib/queries"
+import { useFeatures } from "../../lib/session"
 import { previousRange } from "./compare"
 import { FinanceTab } from "./FinanceTab"
 import { InventoryTab } from "./InventoryTab"
@@ -12,6 +23,7 @@ import { monthLabel } from "./monthClosingText"
 import { ResultsTab } from "./ResultsTab"
 import { SalesTab } from "./SalesTab"
 import { TaxBookTab } from "./TaxBookTab"
+import { TipsTab } from "./TipsTab"
 
 /** Meses y años que se piden más: se calculan sobre el día de hoy en Caracas. */
 function presetRange(id: string, today: string) {
@@ -40,16 +52,25 @@ const day = (date: string) => date.split("-").reverse().join("/")
 /** Informes del negocio: resultados (utilidad), ventas, inventario valorado y finanzas. */
 export function ReportsPage() {
   const boot = useQuery(bootstrapQuery)
+  const features = useFeatures()
   const today = todayInCaracas()
   const [range, setRange] = useState(() => presetRange("month", today))
-  const bounds = { from: dayRange(range.from).from, to: dayRange(range.to).to }
+  // Con sucursales: todas (las de quien consulta) o una.
+  const branches = useBranchChoices()
+  const [branchId, setBranchId] = useState("")
+  const branch = branches?.find((b) => b.id === branchId)
+  const bounds = {
+    from: dayRange(range.from).from,
+    to: dayRange(range.to).to,
+    branchId: branch?.id,
+  }
   const valid = range.from <= range.to
   const period =
     range.from === range.to ? day(range.from) : `${day(range.from)} al ${day(range.to)}`
-  const business = boot.data?.business.name ?? ""
+  const business = `${boot.data?.business.name ?? ""}${branch ? ` · ${branch.name}` : ""}`
   const prev = previousRange(range)
   const compare = {
-    bounds: { from: dayRange(prev.from).from, to: dayRange(prev.to).to },
+    bounds: { from: dayRange(prev.from).from, to: dayRange(prev.to).to, branchId: branch?.id },
     label: prev.label,
     period: prev.from === prev.to ? day(prev.from) : `${day(prev.from)} al ${day(prev.to)}`,
   }
@@ -66,6 +87,21 @@ export function ReportsPage() {
     <div className="grid grid-cols-1 gap-4">
       <div className="flex flex-wrap items-center gap-2 print:hidden">
         <h1 className="mr-auto font-semibold text-xl">Informes</h1>
+        {branches ? (
+          <NativeSelect
+            aria-label="Sucursal"
+            value={branchId}
+            onChange={(e) => setBranchId(e.target.value)}
+            className="h-8 w-auto py-1"
+          >
+            <option value="">Todas las sucursales</option>
+            {branches.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}
+              </option>
+            ))}
+          </NativeSelect>
+        ) : null}
         {oneMonth ? (
           <Button variant="outline" size="sm" onClick={() => setClosingMonth(true)}>
             <MessageCircleIcon /> Cierre del mes
@@ -98,6 +134,11 @@ export function ReportsPage() {
           <TabsTrigger value="finanzas" className="h-8">
             Finanzas
           </TabsTrigger>
+          {features.tips ? (
+            <TabsTrigger value="propinas" className="h-8">
+              Propinas
+            </TabsTrigger>
+          ) : null}
         </TabsList>
 
         <TabsContent value="resultados" className="grid grid-cols-1 gap-4">
@@ -117,11 +158,17 @@ export function ReportsPage() {
           {valid ? <TaxBookTab bounds={bounds} period={period} business={business} /> : null}
         </TabsContent>
         <TabsContent value="inventario">
-          <InventoryTab business={business} today={day(today)} />
+          <InventoryTab business={business} today={day(today)} branchId={branch?.id ?? ""} />
         </TabsContent>
         <TabsContent value="finanzas">
           <FinanceTab business={business} today={day(today)} />
         </TabsContent>
+        {features.tips ? (
+          <TabsContent value="propinas" className="grid grid-cols-1 gap-4">
+            <Period range={range} setRange={setRange} today={today} preset={preset?.id} />
+            {valid ? <TipsTab bounds={bounds} period={period} business={business} /> : null}
+          </TabsContent>
+        ) : null}
       </Tabs>
     </div>
   )

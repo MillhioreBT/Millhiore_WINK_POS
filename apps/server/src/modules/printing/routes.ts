@@ -1,12 +1,13 @@
 import { createRoute, z } from "@hono/zod-openapi"
-import { apiErrorSchema, printerSettingsSchema } from "@millhiore/contracts"
+import { apiErrorSchema, printBillSchema, printerSettingsSchema } from "@millhiore/contracts"
 import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
-import { HttpError } from "../../http/errors"
+import { forbidden, HttpError } from "../../http/errors"
 import { canView } from "../documents/routes"
 import { getDocument } from "../documents/service"
 import {
   kickDrawer,
+  printBill,
   printDocument,
   printerSettings,
   printTestPage,
@@ -77,6 +78,19 @@ const testRoute = createRoute({
   },
 })
 
+const billRoute = createRoute({
+  method: "post",
+  path: "/api/print/bill",
+  tags: ["Impresión"],
+  summary: "Imprime la precuenta de una mesa en la impresora térmica",
+  request: { body: { content: json(printBillSchema), required: true } },
+  responses: {
+    200: { description: "Impreso", content: json(okSchema) },
+    403: { description: "Falta table.serve o sale.create", ...err },
+    ...printerErrors,
+  },
+})
+
 const drawerRoute = createRoute({
   method: "post",
   path: "/api/print/drawer",
@@ -118,6 +132,15 @@ export function registerPrintingRoutes(app: App, deps: AppDeps): void {
     const parsed = printerSettingsSchema.partial().safeParse(raw)
     if (!parsed.success) throw new HttpError(422, "VALIDATION", "Datos de impresora inválidos")
     await printTestPage(deps.db, withPatch(printerSettings(deps.db), parsed.data), deps.now())
+    return c.json({ ok: true as const, drawerOpened: false }, 200)
+  })
+
+  app.openapi(billRoute, async (c) => {
+    const actor = actorOf(c)
+    if (!actor.permissions.has("table.serve") && !actor.permissions.has("sale.create")) {
+      throw forbidden("table.serve")
+    }
+    await printBill(deps.db, c.req.valid("json"))
     return c.json({ ok: true as const, drawerOpened: false }, 200)
   })
 

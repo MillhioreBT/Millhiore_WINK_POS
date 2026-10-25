@@ -23,10 +23,22 @@ import { bold, downloadXlsx, fileName, moneyCell, qtyCell } from "../../lib/xlsx
 import { ExportButtons, PrintHeader } from "./parts"
 
 /** Lo que hay en el inventario hoy, a costo y a precio de venta. No depende del período. */
-export function InventoryTab({ business, today }: { business: string; today: string }) {
-  const locations = useLocations()
-  const [locationId, setLocationId] = useState("")
-  const { data: r, isLoading } = useQuery(inventoryReportQuery(locationId))
+export function InventoryTab({
+  business,
+  today,
+  branchId,
+}: {
+  business: string
+  today: string
+  /** Con sucursales, la elegida (vacío: todas las de quien consulta). */
+  branchId: string
+}) {
+  const all = useLocations()
+  const locations = branchId ? (all?.filter((l) => l.branchId === branchId) ?? null) : all
+  const [chosen, setLocationId] = useState("")
+  // Una ubicación de otra sucursal deja de valer al cambiar de sucursal.
+  const locationId = locations?.some((l) => l.id === chosen) ? chosen : ""
+  const { data: r, isLoading } = useQuery(inventoryReportQuery(locationId, branchId))
   const where = locations?.find((l) => l.id === locationId)?.name
   const [search, setSearch] = useState("")
   const [lowOnly, setLowOnly] = useState(false)

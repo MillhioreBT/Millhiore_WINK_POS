@@ -15,6 +15,7 @@ import {
   DialogTitle,
   Field,
   Input,
+  NativeSelect,
   Table,
   TableBody,
   TableCell,
@@ -27,16 +28,19 @@ import {
   TabsTrigger,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
-import { BanIcon, PrinterIcon, Undo2Icon } from "lucide-react"
+import { BanIcon, FileTextIcon, PrinterIcon, TagIcon, Undo2Icon } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 import { api, errorMessage } from "../../lib/api"
+import { useBranchChoices } from "../../lib/branches"
 import { dayRange, todayInCaracas } from "../../lib/days"
 import { formatDay, formatMoney, formatTime } from "../../lib/format"
 import { usePrintDocument } from "../../lib/printing"
 import { bootstrapQuery, documentQuery, documentsQuery, queryClient } from "../../lib/queries"
 import { can, useMe } from "../../lib/session"
+import { LabelsDialog } from "../labels/LabelsDialog"
 import { ShiftsList } from "../shifts/ShiftsList"
+import { InvoiceDialog } from "./InvoiceDialog"
 import { Receipt, ReceiptDialog } from "./ReceiptDialog"
 import { ReturnDialog } from "./ReturnDialog"
 
@@ -55,6 +59,7 @@ const DOC_LABEL: Record<string, string> = {
   DEBT_OUT: "Deuda con proveedor",
   STOCK_TRANSFER: "Traslado",
   PURCHASE_RETURN: "Devolución a proveedor",
+  PRODUCTION: "Producción",
 }
 
 const VOID_PERMISSION: Record<string, string> = {
@@ -72,7 +77,19 @@ const VOID_PERMISSION: Record<string, string> = {
   DEBT_OUT: "payable.manage",
   STOCK_TRANSFER: "inventory.adjust",
   PURCHASE_RETURN: "purchase.void",
+  PRODUCTION: "inventory.adjust",
 }
+
+/** Los documentos de nombre masculino (el gasto, el ajuste…): «anulado» en vez de «anulada». */
+const MASCULINE = new Set([
+  "PAYMENT_IN",
+  "EXPENSE",
+  "PAYMENT_OUT",
+  "CASH_IN",
+  "CASH_OUT",
+  "ADJUSTMENT",
+  "STOCK_TRANSFER",
+])
 
 /** Detalle imprimible de un documento, con anulación si se tiene el permiso. */
 export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose: () => void }) {
@@ -82,6 +99,8 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
   const { print, printing } = usePrintDocument()
   const [confirming, setConfirming] = useState(false)
   const [returning, setReturning] = useState(false)
+  const [labeling, setLabeling] = useState(false)
+  const [invoicing, setInvoicing] = useState(false)
   const [receiptId, setReceiptId] = useState<string | null>(null)
   const [reason, setReason] = useState("")
   const [busy, setBusy] = useState(false)
@@ -95,6 +114,14 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
     !doc.reversedBy
   const canVoid =
     can(me, VOID_PERMISSION[doc.type] ?? "-") && !doc.reversesDocumentId && !doc.reversedBy
+  // Los números de la factura emitida aparte: anotarlos pide vender; cambiarlos, anular.
+  const current = detail.data ?? doc
+  const canInvoice =
+    doc.type === "SALE" &&
+    !doc.reversesDocumentId &&
+    !doc.reversedBy &&
+    (current.invoiceRequested || !!current.contactTaxId) &&
+    can(me, current.invoice ? "sale.void" : "sale.create")
 
   const voidSale = async () => {
     setBusy(true)
@@ -116,8 +143,9 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
         queryClient.invalidateQueries({ queryKey: ["stock-reasons"] }),
         queryClient.invalidateQueries({ queryKey: ["transfers"] }),
         queryClient.invalidateQueries({ queryKey: ["lots"] }),
+        queryClient.invalidateQueries({ queryKey: ["production"] }),
       ])
-      toast.success(`${label} ${doc.number} ${doc.type === "EXPENSE" ? "anulado" : "anulada"}`)
+      toast.success(`${label} ${doc.number} ${MASCULINE.has(doc.type) ? "anulado" : "anulada"}`)
       onClose()
     } catch (e) {
       toast.error(errorMessage(e))
@@ -168,7 +196,7 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
             </div>
           </div>
         ) : null}
-        <DialogFooter>
+        <DialogFooter className="sm:flex-wrap">
           {canReturn && !confirming ? (
             <Button variant="outline" onClick={() => setReturning(true)}>
               <Undo2Icon /> {doc.type === "PURCHASE" ? "Devolver al proveedor" : "Devolver"}
@@ -183,6 +211,16 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
               <BanIcon /> Anular
             </Button>
           ) : null}
+          {canInvoice && !confirming ? (
+            <Button variant="outline" onClick={() => setInvoicing(true)}>
+              <FileTextIcon /> {current.invoice ? "Cambiar factura" : "Anotar factura"}
+            </Button>
+          ) : null}
+          {doc.type === "PURCHASE" && !doc.reversesDocumentId && detail.data ? (
+            <Button variant="outline" onClick={() => setLabeling(true)}>
+              <TagIcon /> Etiquetas
+            </Button>
+          ) : null}
           <Button
             variant="outline"
             onClick={() => print(doc.id)}
@@ -193,6 +231,17 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
           <Button onClick={onClose}>Cerrar</Button>
         </DialogFooter>
       </DialogContent>
+      {labeling && detail.data ? (
+        // Una etiqueta por cada unidad que llegó en la compra.
+        <LabelsDialog
+          initial={detail.data.lines.map((l) => ({
+            variantId: l.variantId,
+            qty: Math.max(1, Math.ceil(l.qtyMilli / 1000)),
+          }))}
+          onClose={() => setLabeling(false)}
+        />
+      ) : null}
+      {invoicing ? <InvoiceDialog doc={current} onClose={() => setInvoicing(false)} /> : null}
       {returning ? (
         <ReturnDialog
           documentId={doc.id}
@@ -218,7 +267,12 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
 function DaySales() {
   const [day, setDay] = useState(todayInCaracas)
   const range = dayRange(day)
-  const docs = useQuery(documentsQuery({ type: "SALE,PAYMENT_IN,RETURN", ...range }))
+  // Con sucursales: todas (las de quien consulta) o una.
+  const branches = useBranchChoices()
+  const [branchId, setBranchId] = useState("")
+  const docs = useQuery(
+    documentsQuery({ type: "SALE,PAYMENT_IN,RETURN", ...range, branchId: branchId || undefined }),
+  )
   const [open, setOpen] = useState<DocumentSummary | null>(null)
 
   // Los abonos y las devoluciones salen en la lista; las devoluciones restan de lo vendido.
@@ -237,14 +291,31 @@ function DaySales() {
         <span className="inline-block font-medium first-letter:uppercase">
           {formatDay(range.from + 12 * 3_600_000)}
         </span>
-        <Input
-          type="date"
-          value={day}
-          max={todayInCaracas()}
-          onChange={(e) => e.target.value && setDay(e.target.value)}
-          className="w-44 sm:ml-auto"
-          aria-label="Día"
-        />
+        <span className="flex flex-wrap gap-2 sm:ml-auto">
+          {branches ? (
+            <NativeSelect
+              aria-label="Sucursal"
+              value={branchId}
+              onChange={(e) => setBranchId(e.target.value)}
+              className="w-auto"
+            >
+              <option value="">Todas las sucursales</option>
+              {branches.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+            </NativeSelect>
+          ) : null}
+          <Input
+            type="date"
+            value={day}
+            max={todayInCaracas()}
+            onChange={(e) => e.target.value && setDay(e.target.value)}
+            className="w-44"
+            aria-label="Día"
+          />
+        </span>
       </div>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -309,9 +380,15 @@ function DaySales() {
                     <span className="block font-normal text-muted-foreground text-xs sm:hidden">
                       {formatTime(d.postedAt)}
                     </span>
+                    <InvoiceNote doc={d} />
                   </TableCell>
                   <TableCell className="hidden sm:table-cell">{formatTime(d.postedAt)}</TableCell>
-                  <TableCell className="hidden md:table-cell">{d.createdBy ?? "—"}</TableCell>
+                  <TableCell className="hidden md:table-cell">
+                    {d.createdBy ?? "—"}
+                    {branches && d.branch ? (
+                      <span className="block text-muted-foreground text-xs">{d.branch.name}</span>
+                    ) : null}
+                  </TableCell>
                   <TableCell className="tabular text-right">
                     {formatMoney(d.totalMinor, d.currency)}
                   </TableCell>
@@ -344,17 +421,102 @@ function DaySales() {
   )
 }
 
+/** Bajo el número: la factura anotada o, si se pidió, que falta anotarla. */
+function InvoiceNote({ doc }: { doc: DocumentSummary }) {
+  if (doc.invoice) {
+    return (
+      <span className="block font-normal text-muted-foreground text-xs">
+        Factura {doc.invoice.invoiceNumber}
+      </span>
+    )
+  }
+  if (!doc.invoiceRequested || doc.reversedBy) return null
+  return (
+    <Badge variant="warning" className="mt-1 font-normal">
+      Factura por anotar
+    </Badge>
+  )
+}
+
+/** Las ventas con factura a las que todavía no se les anotaron sus números (de cualquier día). */
+function PendingInvoices() {
+  const docs = useQuery(documentsQuery({ type: "SALE", invoice: "pending" }))
+  const [open, setOpen] = useState<DocumentSummary | null>(null)
+  const list = docs.data ?? []
+  return (
+    <div className="grid grid-cols-1 gap-4">
+      <p className="text-muted-foreground text-sm">
+        La factura la emite la máquina fiscal o el talonario de forma libre; aquí se anotan su
+        número y su número de control para el libro de ventas.
+      </p>
+      <Card>
+        <CardContent className="p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Venta</TableHead>
+                <TableHead>Cliente</TableHead>
+                <TableHead className="text-right">Total</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {list.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={3} className="py-10 text-center text-muted-foreground">
+                    {docs.isLoading ? "Cargando…" : "Todas las facturas están anotadas."}
+                  </TableCell>
+                </TableRow>
+              ) : null}
+              {list.map((d) => (
+                <TableRow key={d.id}>
+                  <TableCell className="font-medium">
+                    <button
+                      type="button"
+                      className="cursor-pointer text-primary underline-offset-4 hover:underline"
+                      onClick={() => setOpen(d)}
+                    >
+                      {d.number}
+                    </button>
+                    <span className="block font-normal text-muted-foreground text-xs">
+                      {formatDay(d.postedAt)} · {formatTime(d.postedAt)}
+                    </span>
+                  </TableCell>
+                  <TableCell className="whitespace-normal">
+                    {d.contactName}
+                    <span className="block text-muted-foreground text-xs">{d.contactTaxId}</span>
+                  </TableCell>
+                  <TableCell className="tabular text-right">
+                    {formatMoney(d.totalMinor, d.currency)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+      {open ? <DocumentDialog doc={open} onClose={() => setOpen(null)} /> : null}
+    </div>
+  )
+}
+
 export function SalesPage() {
   const me = useMe()
   const showShifts = can(me, "shift.manage", "finance.view")
+  const invoices = useQuery(bootstrapQuery).data?.fiscal.invoices ?? false
   return (
     <div className="grid grid-cols-1 gap-4">
       <h1 className="font-semibold text-xl">Ventas</h1>
       <Tabs defaultValue="ventas">
         <TabsList>
           <TabsTrigger value="ventas">Ventas del día</TabsTrigger>
+          {invoices ? <TabsTrigger value="facturas">Facturas por anotar</TabsTrigger> : null}
           {showShifts ? <TabsTrigger value="turnos">Turnos y cierres</TabsTrigger> : null}
         </TabsList>
+        {invoices ? (
+          <TabsContent value="facturas">
+            <PendingInvoices />
+          </TabsContent>
+        ) : null}
         <TabsContent value="ventas">
           <DaySales />
         </TabsContent>

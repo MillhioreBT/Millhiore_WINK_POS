@@ -6,9 +6,12 @@ import {
   shiftReportSchema,
   shiftSchema,
 } from "@millhiore/contracts"
+import { terminal } from "@millhiore/db"
+import { eq } from "drizzle-orm"
 import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
+import { requireOwnBranch } from "../../posting/post"
 import { postingContext } from "../settings/service"
 import { closeShift, currentShift, getShift, listShifts, openShift, shiftReport } from "./service"
 
@@ -115,18 +118,23 @@ export function registerShiftRoutes(app: App, deps: AppDeps): void {
   })
 
   app.openapi(listRoute, (c) => {
-    if (!canSee(actorOf(c).permissions)) {
+    const actor = actorOf(c)
+    if (!canSee(actor.permissions)) {
       throw new HttpError(403, "FORBIDDEN", "Falta el permiso finance.view")
     }
-    return c.json(listShifts(deps.db, c.req.valid("query").limit), 200)
+    const branches = actor.branchIds ? [...actor.branchIds] : null
+    return c.json(listShifts(deps.db, c.req.valid("query").limit, branches), 200)
   })
 
   app.openapi(reportRoute, (c) => {
-    if (!canSee(actorOf(c).permissions)) {
+    const actor = actorOf(c)
+    if (!canSee(actor.permissions)) {
       throw new HttpError(403, "FORBIDDEN", "Falta el permiso finance.view")
     }
     const { id } = c.req.valid("param")
-    getShift(deps.db, id)
+    const shift = getShift(deps.db, id)
+    const term = deps.db.select().from(terminal).where(eq(terminal.id, shift.terminalId)).get()
+    if (term) requireOwnBranch(deps.db, actor, [term.locationId])
     return c.json(shiftReport(deps.db, id), 200)
   })
 }

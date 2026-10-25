@@ -1,3 +1,4 @@
+import { resolve } from "node:path"
 import tailwindcss from "@tailwindcss/vite"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
@@ -22,5 +23,16 @@ export default defineConfig({
     },
   },
   // El objetivo del plan es < 250 KB gzip de JS inicial; el aviso de Vite mide sin comprimir.
-  build: { target: "es2022", sourcemap: true, chunkSizeWarningLimit: 800 },
+  // Dos páginas: la app y el catálogo en línea (que no carga nada de la app).
+  build: {
+    target: "es2022",
+    sourcemap: true,
+    chunkSizeWarningLimit: 800,
+    rolldownOptions: {
+      input: {
+        main: resolve(import.meta.dirname, "index.html"),
+        catalogo: resolve(import.meta.dirname, "catalogo.html"),
+      },
+    },
+  },
 })

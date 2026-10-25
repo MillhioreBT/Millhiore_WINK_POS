@@ -10,7 +10,7 @@ import {
   text,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core"
-import { discountCode, saleCharge, stockReason, tax, variant } from "./catalog"
+import { discountCode, type PickedModifier, saleCharge, stockReason, tax, variant } from "./catalog"
 import { contact } from "./contacts"
 import { currency, location, terminal } from "./core"
 import { account, cashShift, expenseCategory, paymentMethod, surcharge } from "./finance"
@@ -84,6 +84,27 @@ export const document = sqliteTable(
     stockReasonId: text("stock_reason_id").references(() => stockReason.id),
     /** Venta con código de descuento: cuál se usó (cuenta como un uso mientras no se anule). */
     discountCodeId: text("discount_code_id").references(() => discountCode.id),
+    /**
+     * Venta: la propina que dejó el cliente, en la moneda del documento y en la legal (con signo
+     * contrario en el reverso). No es parte del total: los pagos la cubren además.
+     */
+    tipMinor: integer("tip_minor").notNull().default(0),
+    tipLegalMinor: integer("tip_legal_minor").notNull().default(0),
+    /** Para quién es la propina (un usuario); null = para todo el equipo. */
+    tipUserId: text("tip_user_id"),
+    /**
+     * Los datos fiscales del cliente (o proveedor) tal como eran al registrarse: nombre o razón
+     * social, cédula o RIF y dirección. Cambiar el contacto después no cambia el documento.
+     */
+    customerName: text("customer_name"),
+    customerTaxId: text("customer_tax_id"),
+    customerAddress: text("customer_address"),
+    /**
+     * Venta con factura (no solo nota de venta): exige el nombre y la cédula o el RIF del cliente.
+     * La factura la emite el medio autorizado (máquina fiscal, forma libre o, desde 2027, el medio
+     * digital del SENIAT) y sus números se anotan en `fiscal_invoice`.
+     */
+    invoiceRequested: integer("invoice_requested", { mode: "boolean" }).notNull().default(false),
     note: text("note"),
     createdBy: text("created_by"),
     postedAt: integer("posted_at").notNull(),
@@ -132,6 +153,10 @@ export const documentLine = sqliteTable(
      */
     costMinor: integer("cost_minor"),
     costCurrency: text("cost_currency").references(() => currency.code),
+    /** Opciones y extras elegidos (ya incluidos en el precio); null = ninguno. */
+    modifiers: text("modifiers", { mode: "json" }).$type<PickedModifier[]>(),
+    /** Indicaciones para la cocina («sin cebolla»). */
+    note: text("note"),
   },
   (t) => [
     check("document_line_qty_nonzero", sql`${t.qtyMilli} <> 0`),

@@ -1,3 +1,4 @@
+import { whatsappNumber } from "@millhiore/domain"
 import {
   Badge,
   Button,
@@ -13,15 +14,6 @@ import { HandCoinsIcon, MessageCircleIcon } from "lucide-react"
 import { formatDateTime, formatMoney } from "../../lib/format"
 import { bootstrapQuery, statementQuery } from "../../lib/queries"
 import { can, useMe } from "../../lib/session"
-
-/** "0414-1234567" → "584141234567" (el formato que pide wa.me); null si no parece un teléfono. */
-export function whatsappNumber(phone: string | null): string | null {
-  if (!phone) return null
-  const digits = phone.replace(/\D/g, "")
-  if (digits.length < 10) return null
-  if (digits.startsWith("58")) return digits
-  return `58${digits.replace(/^0+/, "")}`
-}
 
 /** Estado de cuenta de un cliente: lo que debe venta por venta y su historial de fiados y abonos. */
 export function StatementDialog({

@@ -24,6 +24,7 @@ import { useState } from "react"
 import { toast } from "sonner"
 import { TerminalPicker } from "../../components/TerminalPicker"
 import { api, errorMessage } from "../../lib/api"
+import { useBranchNames } from "../../lib/branches"
 import { LOCATION_KIND_LABEL } from "../../lib/locations"
 import { bootstrapQuery, locationsQuery, queryClient, terminalsQuery } from "../../lib/queries"
 
@@ -47,6 +48,9 @@ export function LocationsCard() {
   const [location, setLocation] = useState<StockLocation | null | undefined>(undefined)
   const [terminal, setTerminal] = useState<TerminalInfo | null | undefined>(undefined)
   const active = (locations.data ?? []).filter((l) => l.active)
+  // Con sucursales, de cuál es cada una.
+  const branches = useBranchNames()
+  const at = (branchName: string) => (branches.size ? ` · ${branchName}` : "")
 
   return (
     <Card>
@@ -74,7 +78,8 @@ export function LocationsCard() {
                     </Badge>
                   )}
                   <span className="block text-muted-foreground text-xs">
-                    {LOCATION_KIND_LABEL[l.kind]} · {l.productsInStock} producto
+                    {LOCATION_KIND_LABEL[l.kind]}
+                    {at(l.branchName)} · {l.productsInStock} producto
                     {l.productsInStock === 1 ? "" : "s"} con existencia
                   </span>
                 </span>
@@ -122,6 +127,7 @@ export function LocationsCard() {
                   )}
                   <span className="block text-muted-foreground text-xs">
                     Vende desde {t.locationName}
+                    {at(t.branchName)}
                   </span>
                 </span>
                 <Button
@@ -156,12 +162,17 @@ export function LocationsCard() {
         </section>
       </CardContent>
       {location !== undefined ? (
-        <LocationDialog location={location} onClose={() => setLocation(undefined)} />
+        <LocationDialog
+          location={location}
+          branches={branches}
+          onClose={() => setLocation(undefined)}
+        />
       ) : null}
       {terminal !== undefined ? (
         <TerminalDialog
           terminal={terminal}
           locations={active}
+          branches={branches}
           onClose={() => setTerminal(undefined)}
         />
       ) : null}
@@ -171,13 +182,17 @@ export function LocationsCard() {
 
 function LocationDialog({
   location,
+  branches,
   onClose,
 }: {
   location: StockLocation | null
+  /** Las sucursales (vacío si el negocio no las usa). */
+  branches: Map<string, string>
   onClose: () => void
 }) {
   const [name, setName] = useState(location?.name ?? "")
   const [kind, setKind] = useState<LocationKind>(location?.kind ?? "warehouse")
+  const [branchId, setBranchId] = useState(location?.branchId ?? [...branches.keys()][0] ?? "main")
   const [active, setActive] = useState(location?.active ?? true)
   const [busy, setBusy] = useState(false)
 
@@ -188,10 +203,12 @@ function LocationDialog({
       if (location) {
         await api(`/api/locations/${location.id}`, {
           method: "PATCH",
-          body: { name: name.trim(), kind, active },
+          body: { name: name.trim(), kind, active, ...(branches.size ? { branchId } : {}) },
         })
       } else {
-        await api("/api/locations", { body: { name: name.trim(), kind } })
+        await api("/api/locations", {
+          body: { name: name.trim(), kind, ...(branches.size ? { branchId } : {}) },
+        })
       }
       await refresh()
       toast.success(location ? "Ubicación guardada" : `Ubicación «${name.trim()}» creada`)
@@ -237,6 +254,29 @@ function LocationDialog({
               ))}
             </NativeSelect>
           </Field>
+          {branches.size ? (
+            <Field
+              label="Sucursal"
+              htmlFor="loc-branch"
+              hint={
+                location
+                  ? "Con existencia o con cajas ya no cambia de sucursal: crea otra allá."
+                  : undefined
+              }
+            >
+              <NativeSelect
+                id="loc-branch"
+                value={branchId}
+                onChange={(e) => setBranchId(e.target.value)}
+              >
+                {[...branches].map(([id, branchName]) => (
+                  <option key={id} value={id}>
+                    {branchName}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
+          ) : null}
           {location ? (
             <div className="flex items-start gap-3">
               <input
@@ -271,10 +311,12 @@ function LocationDialog({
 function TerminalDialog({
   terminal,
   locations,
+  branches,
   onClose,
 }: {
   terminal: TerminalInfo | null
   locations: StockLocation[]
+  branches: Map<string, string>
   onClose: () => void
 }) {
   const [name, setName] = useState(terminal?.name ?? "")
@@ -284,7 +326,10 @@ function TerminalDialog({
   // Una caja desactivada puede estar en una ubicación que ya no está activa.
   const options =
     terminal && !locations.some((l) => l.id === terminal.locationId)
-      ? [{ id: terminal.locationId, name: terminal.locationName }, ...locations]
+      ? [
+          { id: terminal.locationId, name: terminal.locationName, branchName: terminal.branchName },
+          ...locations,
+        ]
       : locations
 
   const submit = async (e: React.FormEvent) => {
@@ -346,6 +391,7 @@ function TerminalDialog({
               {options.map((l) => (
                 <option key={l.id} value={l.id}>
                   {l.name}
+                  {branches.size ? ` · ${l.branchName}` : ""}
                 </option>
               ))}
             </NativeSelect>

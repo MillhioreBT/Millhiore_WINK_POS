@@ -1,11 +1,14 @@
 import type {
   Account,
+  ApiKey,
   AuditEntry,
   Bootstrap,
+  BranchInfo,
   CatalogItem,
   Category,
   Contact,
   DaySummary,
+  DiningFloor,
   DiscountCode,
   DocumentDetail,
   DocumentSummary,
@@ -14,19 +17,31 @@ import type {
   Expenses,
   FiscalSettingsBody,
   InventoryReport,
+  KitchenStation,
+  KitchenTicket,
+  LabelSettings,
   Lots,
   Me,
+  ModifierGroup,
+  NetworkInfo,
   Onboarding,
   Payables,
   PaymentMethodRow,
+  PluginInfo,
+  PluginLog,
+  PluginPage,
   PriceList,
+  ProductDetail,
+  ProductionRow,
   QuoteDetail,
   QuoteSummary,
   Receivables,
   RecurringExpense,
+  RemoteStatus,
   ResultsReport,
   SaleCharge,
   SalesReport,
+  ScaleSettings,
   SessionRow,
   Shift,
   ShiftReport,
@@ -34,9 +49,17 @@ import type {
   StockAdjustments,
   StockLocation,
   StockReason,
+  StorefrontStatus,
+  SyncStatus,
+  TabDetail,
   TaxBook,
+  TelegramSettings,
   TerminalInfo,
+  TipsReport,
   TransferRow,
+  Webhook,
+  WebhookDelivery,
+  WebOrder,
 } from "@millhiore/contracts"
 import { QueryClient, queryOptions } from "@tanstack/react-query"
 import { ApiError, api } from "./api"
@@ -75,6 +98,8 @@ export interface UserRow {
   roleId: string | null
   active: boolean
   mustChangePassword: boolean
+  /** Sucursales donde trabaja; null, en todas. */
+  branchIds: string[] | null
 }
 
 export interface Tax {
@@ -125,13 +150,118 @@ export const productsQuery = (opts: { all?: boolean } = {}) =>
     queryFn: () => api<CatalogItem[]>(`/api/products${opts.all ? "?all=true" : ""}`),
   })
 
-export const documentsQuery = (params: { type: string; from?: number; to?: number }) =>
+/** Cómo se imprimen las etiquetas con código de barras (papel, tamaño, precio). */
+export const labelSettingsQuery = queryOptions({
+  queryKey: ["settings", "labels"],
+  queryFn: () => api<LabelSettings>("/api/settings/labels"),
+})
+
+export const apiKeysQuery = queryOptions({
+  queryKey: ["api-keys"],
+  queryFn: () => api<ApiKey[]>("/api/api-keys"),
+})
+
+export const remoteQuery = queryOptions({
+  queryKey: ["remote"],
+  queryFn: () => api<RemoteStatus>("/api/remote"),
+})
+
+/** Si este servidor es central o sucursal, y cómo va la sincronización. */
+export const syncStatusQuery = queryOptions({
+  queryKey: ["sync"],
+  queryFn: () => api<SyncStatus>("/api/sync/status"),
+})
+
+/** Los plugins instalados (Ajustes → Integraciones). */
+export const pluginsQuery = queryOptions({
+  queryKey: ["plugins"],
+  queryFn: () => api<PluginInfo[]>("/api/plugins"),
+})
+
+/** Las pantallas de plugins que puede usar quien entró (para el menú). */
+export const pluginPagesQuery = queryOptions({
+  queryKey: ["plugins", "pages"],
+  queryFn: () => api<PluginPage[]>("/api/plugins/pages"),
+  staleTime: 60_000,
+})
+
+export const pluginLogsQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["plugins", "logs", id],
+    queryFn: () => api<PluginLog[]>(`/api/plugins/${id}/logs`),
+    refetchInterval: 5_000,
+  })
+
+/** Los pedidos del catálogo de un estado; los nuevos se vuelven a pedir solos. */
+export const ordersQuery = (status: WebOrder["status"] | "all") =>
+  queryOptions({
+    queryKey: ["orders", status],
+    queryFn: () => api<WebOrder[]>(`/api/orders?status=${status}`),
+    refetchInterval: status === "new" ? 15_000 : false,
+  })
+
+/** Cuántos pedidos esperan, para el aviso del menú (cada 30 s). */
+export const ordersCountQuery = queryOptions({
+  queryKey: ["orders", "count"],
+  queryFn: () => api<{ new: number }>("/api/orders/count"),
+  refetchInterval: 30_000,
+})
+
+export const storefrontQuery = queryOptions({
+  queryKey: ["storefront"],
+  queryFn: () => api<StorefrontStatus>("/api/storefront"),
+})
+
+export const networkQuery = queryOptions({
+  queryKey: ["network"],
+  queryFn: () => api<NetworkInfo>("/api/network"),
+})
+
+export const telegramQuery = queryOptions({
+  queryKey: ["telegram"],
+  queryFn: () => api<TelegramSettings>("/api/telegram"),
+})
+
+export const webhooksQuery = queryOptions({
+  queryKey: ["webhooks"],
+  queryFn: () => api<Webhook[]>("/api/webhooks"),
+})
+
+export const webhookDeliveriesQuery = (webhookId: string) =>
+  queryOptions({
+    queryKey: ["webhooks", webhookId, "deliveries"],
+    queryFn: () => api<WebhookDelivery[]>(`/api/webhooks/${webhookId}/deliveries`),
+  })
+
+export const scaleSettingsQuery = queryOptions({
+  queryKey: ["settings", "scale"],
+  queryFn: () => api<ScaleSettings>("/api/settings/scale"),
+})
+
+/** Un producto con todas sus tallas y colores (también los desactivados). */
+export const productDetailQuery = (productId: string) =>
+  queryOptions({
+    queryKey: ["products", "detail", productId],
+    queryFn: () => api<ProductDetail>(`/api/products/${productId}`),
+  })
+
+export const documentsQuery = (params: {
+  type: string
+  from?: number
+  to?: number
+  /** Solo los de esta sucursal (vacío: todas las de quien consulta). */
+  branchId?: string | undefined
+  /** Solo las ventas con factura que todavía no tienen sus números. */
+  invoice?: "pending" | undefined
+}) =>
   queryOptions({
     queryKey: ["documents", params],
     queryFn: () => {
       const q = new URLSearchParams({ type: params.type, limit: "500" })
       if (params.from !== undefined) q.set("from", String(params.from))
       if (params.to !== undefined) q.set("to", String(params.to))
+      if (params.branchId) q.set("branchId", params.branchId)
+      if (params.invoice) q.set("invoice", params.invoice)
       return api<DocumentSummary[]>(`/api/documents?${q}`)
     },
   })
@@ -196,10 +326,15 @@ export const contactsQuery = (
   })
 
 /** Resumen de un día (sin fecha = hoy en la zona del negocio). Hoy se refresca solo. */
-export const daySummaryQuery = (date?: string) =>
+export const daySummaryQuery = (date?: string, branchId?: string) =>
   queryOptions({
-    queryKey: ["reports", "day", date ?? "today"],
-    queryFn: () => api<DaySummary>(`/api/reports/day${date ? `?date=${date}` : ""}`),
+    queryKey: ["reports", "day", date ?? "today", branchId ?? ""],
+    queryFn: () => {
+      const q = new URLSearchParams()
+      if (date) q.set("date", date)
+      if (branchId) q.set("branchId", branchId)
+      return api<DaySummary>(`/api/reports/day${q.size ? `?${q}` : ""}`)
+    },
     // Siempre fresco al entrar: lo vendido hace un momento tiene que verse ya.
     staleTime: 0,
     refetchInterval: date ? false : 60_000,
@@ -349,10 +484,22 @@ export const stockAdjustmentsQuery = (params: { from: number; to: number; reason
     staleTime: 0,
   })
 
-const rangeQuery = (b: { from: number; to: number }) => `from=${b.from}&to=${b.to}`
+/** Un período y, con sucursales, de cuál (vacío: todas las de quien consulta). */
+type Bounds = { from: number; to: number; branchId?: string | undefined }
+
+const rangeQuery = (b: Bounds) =>
+  `from=${b.from}&to=${b.to}${b.branchId ? `&branchId=${encodeURIComponent(b.branchId)}` : ""}`
+
+/** Lo producido por tandas en un período. */
+export const productionQuery = (bounds: { from: number; to: number }) =>
+  queryOptions({
+    queryKey: ["production", bounds],
+    queryFn: () => api<ProductionRow[]>(`/api/production?${rangeQuery(bounds)}`),
+    staleTime: 0,
+  })
 
 /** Estado de resultados de un período (ventas, costo, gastos, utilidad). */
-export const resultsReportQuery = (bounds: { from: number; to: number }) =>
+export const resultsReportQuery = (bounds: Bounds) =>
   queryOptions({
     queryKey: ["reports", "results", bounds],
     queryFn: () => api<ResultsReport>(`/api/reports/results?${rangeQuery(bounds)}`),
@@ -360,30 +507,42 @@ export const resultsReportQuery = (bounds: { from: number; to: number }) =>
   })
 
 /** Ventas de un período por día, producto, método y vendedor. */
-export const salesReportQuery = (bounds: { from: number; to: number }) =>
+export const salesReportQuery = (bounds: Bounds) =>
   queryOptions({
     queryKey: ["reports", "sales", bounds],
     queryFn: () => api<SalesReport>(`/api/reports/sales?${rangeQuery(bounds)}`),
     staleTime: 0,
   })
 
+/** Propinas de un período por quien las recibe. */
+export const tipsReportQuery = (bounds: Bounds) =>
+  queryOptions({
+    queryKey: ["reports", "tips", bounds],
+    queryFn: () => api<TipsReport>(`/api/reports/tips?${rangeQuery(bounds)}`),
+    staleTime: 0,
+  })
+
 /** Libro de ventas o de compras de un período, con el IVA de cada documento. */
-export const taxBookQuery = (bounds: { from: number; to: number }, kind: "sales" | "purchases") =>
+export const taxBookQuery = (bounds: Bounds, kind: "sales" | "purchases") =>
   queryOptions({
     queryKey: ["reports", "tax-book", kind, bounds],
     queryFn: () => api<TaxBook>(`/api/reports/tax-book?kind=${kind}&${rangeQuery(bounds)}`),
     staleTime: 0,
   })
 
-/** Inventario valorado de hoy. */
-/** Inventario valorado de hoy; con `locationId`, solo lo de esa ubicación. */
-export const inventoryReportQuery = (locationId = "") =>
+/**
+ * Inventario valorado de hoy; con `locationId`, solo lo de esa ubicación y, con `branchId`, lo de
+ * esa sucursal.
+ */
+export const inventoryReportQuery = (locationId = "", branchId = "") =>
   queryOptions({
-    queryKey: ["reports", "inventory", locationId],
-    queryFn: () =>
-      api<InventoryReport>(
-        `/api/reports/inventory${locationId ? `?locationId=${encodeURIComponent(locationId)}` : ""}`,
-      ),
+    queryKey: ["reports", "inventory", locationId, branchId],
+    queryFn: () => {
+      const q = new URLSearchParams()
+      if (locationId) q.set("locationId", locationId)
+      else if (branchId) q.set("branchId", branchId)
+      return api<InventoryReport>(`/api/reports/inventory${q.size ? `?${q}` : ""}`)
+    },
     staleTime: 0,
   })
 
@@ -401,6 +560,14 @@ export const chargesQuery = (opts: { all?: boolean } = {}) =>
     queryKey: ["charges", opts.all ? "all" : "active"],
     queryFn: () => api<SaleCharge[]>(`/api/charges${opts.all ? "?all=true" : ""}`),
     staleTime: 60_000,
+  })
+
+/** Sucursales con cuántas ubicaciones y cajas tienen. `all` incluye las desactivadas. */
+export const branchesQuery = (opts: { all?: boolean } = {}) =>
+  queryOptions({
+    queryKey: ["branches", opts.all ? "all" : "active"],
+    queryFn: () => api<BranchInfo[]>(`/api/branches${opts.all ? "?all=true" : ""}`),
+    staleTime: 30_000,
   })
 
 /** Ubicaciones (tienda, depósito…), la tienda primero. `all` incluye las desactivadas. */
@@ -460,6 +627,52 @@ export const quoteQuery = (id: string) =>
     queryFn: () => api<QuoteDetail>(`/api/quotes/${id}`),
     staleTime: 0,
   })
+
+/**
+ * El plano de mesas. Se actualiza solo cada pocos segundos: otro mesonero pudo abrir una cuenta
+ * o cobrarla desde otro equipo.
+ */
+export const diningQuery = queryOptions({
+  queryKey: ["dining"],
+  queryFn: () => api<DiningFloor>("/api/dining"),
+  staleTime: 0,
+  refetchInterval: 5000,
+})
+
+export const tabQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["tabs", id],
+    queryFn: () => api<TabDetail>(`/api/tabs/${id}`),
+    staleTime: 0,
+    refetchInterval: 5000,
+  })
+
+/** Estaciones de la cocina (cocina, barra…), también las desactivadas. */
+export const kitchenStationsQuery = queryOptions({
+  queryKey: ["kitchen", "stations"],
+  queryFn: () => api<KitchenStation[]>("/api/kitchen/stations?all=true"),
+  staleTime: 0,
+})
+
+/** Comandas de una estación (o de todas); la pantalla de cocina se actualiza sola. */
+export const kitchenTicketsQuery = (stationId: string, status: "pending" | "ready") =>
+  queryOptions({
+    queryKey: ["kitchen", "tickets", stationId, status],
+    queryFn: () => {
+      const q = new URLSearchParams({ status })
+      if (stationId) q.set("stationId", stationId)
+      return api<KitchenTicket[]>(`/api/kitchen/tickets?${q}`)
+    },
+    staleTime: 0,
+    refetchInterval: 3000,
+  })
+
+/** Grupos de opciones y extras, también los desactivados. */
+export const modifierGroupsQuery = queryOptions({
+  queryKey: ["modifier-groups"],
+  queryFn: () => api<ModifierGroup[]>("/api/modifier-groups"),
+  staleTime: 0,
+})
 
 /** Guía para arrancar: los primeros pasos del comercio y cuáles faltan. */
 export const onboardingQuery = queryOptions({

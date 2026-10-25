@@ -16,7 +16,9 @@ import {
   formatMoney,
   formatPercent,
   formatQty,
+  formatQtyUnit,
   formatRate,
+  perUnit,
 } from "../../lib/format"
 import { openDrawer, usePrintDocument } from "../../lib/printing"
 import { bootstrapQuery, documentQuery } from "../../lib/queries"
@@ -36,6 +38,7 @@ const TITLE: Record<string, string> = {
   DEBT_OUT: "CUENTA POR PAGAR",
   STOCK_TRANSFER: "TRASLADO DE INVENTARIO",
   PURCHASE_RETURN: "DEVOLUCIÓN A PROVEEDOR",
+  PRODUCTION: "PRODUCCIÓN",
 }
 
 /** Origen y destino de una transferencia; en su anulación el dinero va al revés. */
@@ -50,15 +53,27 @@ const KIND_LABEL: Record<string, string> = {
 
 export type BusinessInfo = Bootstrap["business"]
 
-/** Encabezado de recibos y reportes: nombre, RIF, dirección y teléfono del negocio. */
-export function BusinessHeader({ business }: { business: BusinessInfo | undefined }) {
+/**
+ * Encabezado de recibos y reportes: nombre, RIF, dirección y teléfono del negocio. Lo de una
+ * sucursal lleva su nombre y, si los tiene, su dirección y su teléfono.
+ */
+export function BusinessHeader({
+  business,
+  branch,
+}: {
+  business: BusinessInfo | undefined
+  branch?: DocumentDetail["branch"] | undefined
+}) {
   if (!business) return null
+  const address = branch?.address ?? business.address
+  const phone = branch?.phone ?? business.phone
   return (
     <>
       <p className="font-bold text-sm">{business.name}</p>
+      {branch ? <p>Sucursal {branch.name}</p> : null}
       {business.taxId ? <p>RIF {business.taxId}</p> : null}
-      {business.address ? <p>{business.address}</p> : null}
-      {business.phone ? <p>Tel. {business.phone}</p> : null}
+      {address ? <p>{address}</p> : null}
+      {phone ? <p>Tel. {phone}</p> : null}
     </>
   )
 }
@@ -90,7 +105,7 @@ function TransferReceipt({
   return (
     <div id="receipt" className="mx-auto w-full max-w-[320px] font-mono text-[12px] leading-snug">
       <div className="text-center">
-        <BusinessHeader business={business} />
+        <BusinessHeader business={business} branch={doc.branch} />
         <p className="mt-1">{TITLE[doc.type]}</p>
         <p>
           {doc.number} · {formatDateTime(doc.postedAt)}
@@ -107,7 +122,7 @@ function TransferReceipt({
         <div key={l.lineNo}>
           <p className="flex justify-between gap-2">
             <span>{l.name}</span>
-            <span>{formatQty(Math.abs(l.qtyMilli))}</span>
+            <span>{formatQtyUnit(Math.abs(l.qtyMilli), l.unit)}</span>
           </p>
           <LotLines lots={l.lots} />
         </div>
@@ -121,6 +136,51 @@ function TransferReceipt({
   )
 }
 
+/** Comprobante de una producción: lo producido y lo que se gastó de cada ingrediente, sin precios. */
+function ProductionReceipt({
+  doc,
+  business,
+}: {
+  doc: DocumentDetail
+  business: BusinessInfo | undefined
+}) {
+  return (
+    <div id="receipt" className="mx-auto w-full max-w-[320px] font-mono text-[12px] leading-snug">
+      <div className="text-center">
+        <BusinessHeader business={business} branch={doc.branch} />
+        <p className="mt-1">{TITLE[doc.type]}</p>
+        <p>
+          {doc.number} · {formatDateTime(doc.postedAt)}
+        </p>
+        {doc.createdBy ? <p>Atendió: {doc.createdBy}</p> : null}
+        <p>En: {doc.locationName}</p>
+        {doc.note ? <p>{doc.note}</p> : null}
+        {doc.reversesDocumentId ? <p className="font-bold">ANULACIÓN</p> : null}
+        {doc.reversedBy ? <p className="font-bold">*** ANULADA ***</p> : null}
+      </div>
+      <hr className="my-2 border-dashed border-current" />
+      {doc.lines.map((l) => (
+        <div key={l.lineNo}>
+          <p className="flex justify-between gap-2 font-bold">
+            <span>{l.name}</span>
+            <span>{formatQtyUnit(Math.abs(l.qtyMilli), l.unit)}</span>
+          </p>
+          <LotLines lots={l.lots} />
+          {l.ingredients.length ? (
+            <p className="mt-1">{doc.reversesDocumentId ? "Volvió:" : "Se gastó:"}</p>
+          ) : null}
+          {l.ingredients.map((i) => (
+            <p key={i.variantId} className="flex justify-between gap-2 pl-2">
+              <span>{i.name}</span>
+              <span>{formatQty(i.qtyMilli)}</span>
+            </p>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 /** Recibo de una venta, listo para imprimir en papel térmico de 80 mm. No es una factura fiscal. */
 export function Receipt({
   doc,
@@ -130,6 +190,7 @@ export function Receipt({
   business: BusinessInfo | undefined
 }) {
   if (doc.type === "STOCK_TRANSFER") return <TransferReceipt doc={doc} business={business} />
+  if (doc.type === "PRODUCTION") return <ProductionReceipt doc={doc} business={business} />
   const cur = doc.currency
   // Las líneas exentas o exoneradas se marcan (E), como en la factura venezolana.
   const taxCode = (taxId: string | null, rateBp: number) => (taxId && rateBp === 0 ? " (E)" : "")
@@ -144,7 +205,7 @@ export function Receipt({
   return (
     <div id="receipt" className="mx-auto w-full max-w-[320px] font-mono text-[12px] leading-snug">
       <div className="text-center">
-        <BusinessHeader business={business} />
+        <BusinessHeader business={business} branch={doc.branch} />
         <p className="mt-1">{TITLE[doc.type] ?? doc.type}</p>
         <p>
           {doc.number} · {formatDateTime(doc.postedAt)}
@@ -160,6 +221,12 @@ export function Receipt({
               : "Cliente"}
             : {doc.contactName}
             {doc.contactTaxId ? ` · ${doc.contactTaxId}` : ""}
+          </p>
+        ) : null}
+        {doc.invoiceRequested && doc.contactAddress ? <p>{doc.contactAddress}</p> : null}
+        {doc.invoice ? (
+          <p>
+            Factura N.º {doc.invoice.invoiceNumber} · Control {doc.invoice.controlNumber}
           </p>
         ) : null}
         {doc.expenseCategoryName ? <p>Categoría: {doc.expenseCategoryName}</p> : null}
@@ -203,9 +270,13 @@ export function Receipt({
             {l.name}
             {taxCode(l.taxId, l.taxRateBp)}
           </p>
+          {l.modifiers.map((m) => (
+            <p key={m.id}>&nbsp;&nbsp;+ {m.name}</p>
+          ))}
           <p className="flex justify-between">
             <span>
-              {formatQty(l.qtyMilli)} × {formatMoney(l.unitPriceMinor, cur)}
+              {formatQtyUnit(l.qtyMilli, l.unit)} × {formatMoney(l.unitPriceMinor, cur)}
+              {perUnit(l.unit)}
             </span>
             <span>{formatMoney(l.lineTotalMinor + l.discountMinor, cur)}</span>
           </p>
@@ -283,6 +354,18 @@ export function Receipt({
           <span>TOTAL A PAGAR</span>
           <span>{formatMoney(total, cur)}</span>
         </p>
+      ) : null}
+      {doc.tipMinor ? (
+        <>
+          <p className="flex justify-between">
+            <span>Propina{doc.tipUserName ? ` (${doc.tipUserName})` : ""}</span>
+            <span>{formatMoney(doc.tipMinor, cur)}</span>
+          </p>
+          <p className="flex justify-between font-bold">
+            <span>CON PROPINA</span>
+            <span>{formatMoney(total + doc.tipMinor, cur)}</span>
+          </p>
+        </>
       ) : null}
       {rate && ref && refTotal !== null ? (
         <p className="mt-1 text-center">

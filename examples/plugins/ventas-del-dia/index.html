@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ventas del día</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="/plugins/sdk.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Ventas del día</h1>
+      <p id="estado">Cargando…</p>
+      <dl id="datos" hidden>
+        <dt>Ventas de hoy</dt>
+        <dd id="hoy"></dd>
+        <dt>Total de hoy</dt>
+        <dd id="total"></dd>
+        <dt>Desde que se instaló el plugin</dt>
+        <dd id="desde"></dd>
+      </dl>
+      <button id="actualizar" type="button">Actualizar</button>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

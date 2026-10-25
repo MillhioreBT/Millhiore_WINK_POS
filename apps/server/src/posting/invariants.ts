@@ -264,7 +264,7 @@ export function checkInvariants(db: Db): Violation[] {
     // Los recargos de venta (delivery, servicio) suman al desglose como líneas, con su IVA.
     const docCharges = chargesByDoc.get(d.id) ?? []
     const expectedTaxes =
-      d.type === "ADJUSTMENT" || d.type === "STOCK_TRANSFER"
+      d.type === "ADJUSTMENT" || d.type === "STOCK_TRANSFER" || d.type === "PRODUCTION"
         ? []
         : computeTaxes(
             taxEntries(
@@ -377,6 +377,49 @@ export function checkInvariants(db: Db): Violation[] {
       continue
     }
     if (d.toLocationId) add(5, `${d.number}: solo un traslado lleva ubicación de destino`)
+    // Producción: sin precio, impuestos, pagos ni total; lo producido entra a la ubicación (en el
+    // reverso, sale) y lo demás que mueve la línea son sus ingredientes, que salen (o vuelven).
+    if (d.type === "PRODUCTION") {
+      const docLines = linesByDoc.get(d.id) ?? []
+      const sign = d.reversesDocumentId ? -1 : 1
+      if (
+        storedTaxes.length > 0 ||
+        (paymentsByDoc.get(d.id) ?? []).length > 0 ||
+        d.totalMinor !== 0 ||
+        d.totalLegalMinor !== 0 ||
+        d.creditMinor !== 0
+      ) {
+        add(5, `${d.number}: una producción no lleva impuestos, pagos ni total`)
+      }
+      if (
+        docLines.length === 0 ||
+        docLines.some(
+          (l) => Math.sign(l.qtyMilli) !== sign || l.unitPriceMinor !== 0 || l.lineTotalMinor !== 0,
+        )
+      ) {
+        add(5, `${d.number}: las líneas de la producción no tienen cantidades válidas`)
+      }
+      const moves = stockByDoc.get(d.id) ?? []
+      for (const l of docLines) {
+        const own = moves.filter((m) => m.documentLineId === l.id && m.variantId === l.variantId)
+        if (
+          own.some((m) => m.locationId !== d.locationId) ||
+          own.reduce((acc, m) => acc + m.qtyMilli, 0) !== l.qtyMilli
+        ) {
+          add(5, `${d.number}: lo producido no entra a la existencia de su ubicación`)
+        }
+        if (
+          moves.some(
+            (m) =>
+              m.documentLineId === l.id &&
+              m.variantId !== l.variantId &&
+              Math.sign(m.qtyMilli) !== -sign,
+          )
+        ) {
+          add(5, `${d.number}: los ingredientes de la producción no salen de la existencia`)
+        }
+      }
+    }
     if (d.discountCodeId && d.type !== "SALE") {
       add(5, `${d.number}: solo una venta lleva código de descuento`)
     }
@@ -683,9 +726,20 @@ export function checkInvariants(db: Db): Violation[] {
       amountMinor: a.amountMinor,
       rate: rateOf(d),
     }))
+    // La propina: solo en ventas (y su reverso), con su equivalente legal a la tasa del documento;
+    // los pagos la cubren además del total.
+    if (d.tipMinor !== 0 && d.type !== "SALE") add(5, `${d.number}: solo una venta lleva propina`)
+    if (
+      d.tipMinor !== 0 &&
+      Math.sign(d.tipMinor) * toLegal(Math.abs(d.tipMinor)) !== d.tipLegalMinor
+    ) {
+      add(5, `${d.number}: la propina en moneda legal no sale de la tasa del documento`)
+    }
+    if (d.tipUserId && d.tipMinor === 0)
+      add(5, `${d.number}: dice para quién es una propina que no hay`)
     const s = settle(
       d.currency,
-      d.totalMinor + d.surchargeMinor,
+      d.totalMinor + d.surchargeMinor + d.tipMinor,
       [
         ...payments,
         ...(creditPayment ? [creditPayment] : []),

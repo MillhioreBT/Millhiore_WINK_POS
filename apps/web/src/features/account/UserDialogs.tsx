@@ -18,16 +18,21 @@ import { useState } from "react"
 import { toast } from "sonner"
 import { api, errorMessage } from "../../lib/api"
 import { bootstrapQuery, queryClient, rolesQuery, type UserRow } from "../../lib/queries"
+import { BranchAccess } from "./BranchAccess"
 
 const refreshUsers = () => queryClient.invalidateQueries({ queryKey: ["users"] })
 
-/** Nombre, rol y estado. El servidor impide dejar el negocio sin un dueño activo. */
+/**
+ * Nombre, rol, estado y sucursales. El servidor impide dejar el negocio sin un dueño activo.
+ */
 export function EditUserDialog({ target, onClose }: { target: UserRow; onClose: () => void }) {
   const roles = useQuery(rolesQuery)
+  const branchesOn = useQuery(bootstrapQuery).data?.features.branches ?? false
   const [form, setForm] = useState({
     name: target.name,
     roleId: target.roleId ?? "",
     active: target.active,
+    branchIds: target.branchIds,
   })
   const [busy, setBusy] = useState(false)
 
@@ -37,7 +42,12 @@ export function EditUserDialog({ target, onClose }: { target: UserRow; onClose: 
     try {
       await api(`/api/users/${target.id}`, {
         method: "PATCH",
-        body: { name: form.name.trim(), roleId: form.roleId || undefined, active: form.active },
+        body: {
+          name: form.name.trim(),
+          roleId: form.roleId || undefined,
+          active: form.active,
+          ...(branchesOn ? { branchIds: form.roleId === "owner" ? null : form.branchIds } : {}),
+        },
       })
       toast.success("Usuario guardado")
       await refreshUsers()
@@ -78,6 +88,12 @@ export function EditUserDialog({ target, onClose }: { target: UserRow; onClose: 
               ))}
             </NativeSelect>
           </Field>
+          <BranchAccess
+            id="eu-branches"
+            value={form.branchIds}
+            roleId={form.roleId}
+            onChange={(branchIds) => setForm({ ...form, branchIds })}
+          />
           <div className="flex items-start gap-3">
             <input
               id="eu-active"
@@ -98,7 +114,11 @@ export function EditUserDialog({ target, onClose }: { target: UserRow; onClose: 
           <Button variant="outline" onClick={onClose}>
             Cancelar
           </Button>
-          <Button type="submit" form="user-form" disabled={busy}>
+          <Button
+            type="submit"
+            form="user-form"
+            disabled={busy || (form.branchIds !== null && form.branchIds.length === 0)}
+          >
             {busy ? "Guardando…" : "Guardar"}
           </Button>
         </DialogFooter>
