@@ -1,9 +1,16 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { PrinterSettings } from "@millhiore/contracts"
+import type { PrintBillBody, PrinterSettings } from "@millhiore/contracts"
 import { account, business, type Db, paymentMethod } from "@millhiore/db"
-import { COLUMNS, EscPos, receiptLines, testPageLines, toEscPos } from "@millhiore/printing"
+import {
+  billLines,
+  COLUMNS,
+  EscPos,
+  receiptLines,
+  testPageLines,
+  toEscPos,
+} from "@millhiore/printing"
 import { eq, inArray } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
 import { getDocument } from "../documents/service"
@@ -173,6 +180,13 @@ export async function printDocument(db: Db, id: string, opts: { openDrawer: bool
   const bytes = toEscPos(receiptLines(doc, header, COLUMNS[p.paperWidth]), { openDrawer: drawer })
   await sendToPrinter(p, bytes)
   return { drawerOpened: drawer }
+}
+
+/** Imprime una precuenta en la térmica. */
+export async function printBill(db: Db, bill: PrintBillBody) {
+  const p = printerSettings(db)
+  const header = { ...businessProfile(db), timezone: timezoneOf(db) }
+  await sendToPrinter(p, toEscPos(billLines(bill, header, COLUMNS[p.paperWidth])))
 }
 
 export async function printTestPage(db: Db, p: PrinterSettings, now: number) {

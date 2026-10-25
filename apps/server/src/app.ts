@@ -19,12 +19,15 @@ import { registerCatalogRoutes } from "./modules/catalog/routes"
 import { registerChargeRoutes } from "./modules/charges/routes"
 import { registerContactRoutes } from "./modules/contacts/routes"
 import { registerDebtRoutes } from "./modules/debts/routes"
+import { registerDiningRoutes } from "./modules/dining/routes"
 import { registerDiscountCodeRoutes } from "./modules/discount-codes/routes"
 import { registerDocumentRoutes } from "./modules/documents/routes"
 import { registerExpenseRoutes } from "./modules/expenses/routes"
 import { registerFeatureRoutes } from "./modules/features/routes"
 import { registerImportRoutes } from "./modules/imports/routes"
 import { registerInventoryRoutes } from "./modules/inventory/routes"
+import { registerKitchenRoutes } from "./modules/kitchen/routes"
+import { registerLabelRoutes } from "./modules/labels/routes"
 import { registerLocationRoutes } from "./modules/locations/routes"
 import { registerLotRoutes } from "./modules/lots/routes"
 import { registerPayableRoutes } from "./modules/payables/routes"
@@ -139,6 +142,7 @@ export function createApp(deps: AppDeps) {
   registerInventoryRoutes(app, deps)
   registerLocationRoutes(app, deps)
   registerLotRoutes(app, deps)
+  registerLabelRoutes(app, deps)
   registerDocumentRoutes(app, deps)
   registerDiscountCodeRoutes(app, deps)
   registerExpenseRoutes(app, deps)
@@ -155,6 +159,8 @@ export function createApp(deps: AppDeps) {
   registerDebtRoutes(app, deps)
   registerReportRoutes(app, deps)
   registerQuoteRoutes(app, deps)
+  registerDiningRoutes(app, deps)
+  registerKitchenRoutes(app, deps)
   registerImportRoutes(app, deps)
   registerFeatureRoutes(app, deps)
   registerBackupRoutes(app, deps)

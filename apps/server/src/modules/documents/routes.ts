@@ -16,6 +16,8 @@ import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
 import { postDocument, voidDocument } from "../../posting"
+import { printInBackground } from "../kitchen/routes"
+import { ticketsForSale } from "../kitchen/service"
 import { postingContext } from "../settings/service"
 import { documentType, postReturn, returnableOf } from "./returns"
 import { getDocument, isDocumentType, listDocuments } from "./service"
@@ -224,6 +226,11 @@ export function registerDocumentRoutes(app: App, deps: AppDeps): void {
       { ...body, discountFromCodeOnly: !canDiscount },
       context(actor.userId),
     )
+    // Lo vendido en la caja va a la cocina (lo de una mesa ya fue al pedirlo).
+    if (!result.duplicate && body.type === "SALE" && !body.tab) {
+      ticketsForSale(deps.db, result.id, actor.userId, deps.now())
+      printInBackground(deps)
+    }
     return result.duplicate ? c.json(result, 200) : c.json(result, 201)
   })
 

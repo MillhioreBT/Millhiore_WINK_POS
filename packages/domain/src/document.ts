@@ -30,6 +30,7 @@ export const DOCUMENT_TYPES = [
   "DEBT_OUT",
   "STOCK_TRANSFER",
   "PURCHASE_RETURN",
+  "PRODUCTION",
 ] as const
 export type DocumentType = (typeof DOCUMENT_TYPES)[number]
 
@@ -49,6 +50,7 @@ export const POSTABLE_TYPES = [
   "DEBT_OUT",
   "STOCK_TRANSFER",
   "PURCHASE_RETURN",
+  "PRODUCTION",
 ] as const
 export type PostableType = (typeof POSTABLE_TYPES)[number]
 
@@ -91,6 +93,7 @@ export type PostingErrorCode =
   | "HAS_PAYMENTS"
   | "QUOTE_CLOSED"
   | "DISCOUNT_DENIED"
+  | "TAB_CHANGED"
 
 export class PostingError extends Error {
   constructor(
@@ -117,6 +120,7 @@ const SERIES_TAG: Record<DocumentType, string> = {
   DEBT_OUT: "CP",
   STOCK_TRANSFER: "TL",
   PURCHASE_RETURN: "DC",
+  PRODUCTION: "PR",
 }
 
 /** Número de documento en la serie de su terminal: C1-000123 (ventas) o C1-CM-000123 (compras). */
@@ -235,6 +239,11 @@ export interface DocumentDraft {
   amountMinor?: number
   /** Recargos de venta (delivery, servicio…). Solo en ventas. */
   charges?: readonly DraftCharge[]
+  /**
+   * Venta: la propina que deja el cliente, en la moneda del documento. No es parte de la venta (no
+   * lleva IVA ni IGTF, ni suma al total): los pagos la cubren además del total.
+   */
+  tipMinor?: number
 }
 
 export interface PlannedLine {
@@ -287,6 +296,9 @@ export interface PostingPlan {
   allocations: DraftAllocation[]
   /** Recargos de venta, ya calculados; los de monto cero no se guardan. */
   charges: PlannedCharge[]
+  /** Propina de una venta, en la moneda del documento y en la legal; 0 en lo demás. */
+  tipMinor: number
+  tipLegalMinor: number
 }
 
 /**
@@ -571,6 +583,8 @@ function planCashMovement(draft: DocumentDraft, book: CurrencyBook): PostingPlan
     creditLegalMinor: 0,
     allocations: [],
     charges: [],
+    tipMinor: 0,
+    tipLegalMinor: 0,
   }
 }
 
@@ -636,6 +650,8 @@ function planExpense(draft: DocumentDraft, book: CurrencyBook): PostingPlan {
     creditLegalMinor: toLegal(credit.creditDocMinor),
     allocations: [],
     charges: [],
+    tipMinor: 0,
+    tipLegalMinor: 0,
   }
 }
 
@@ -710,6 +726,8 @@ function planTransfer(draft: DocumentDraft, book: CurrencyBook): PostingPlan {
     creditLegalMinor: 0,
     allocations: [],
     charges: [],
+    tipMinor: 0,
+    tipLegalMinor: 0,
   }
 }
 
@@ -772,6 +790,8 @@ function planDisbursement(draft: DocumentDraft, book: CurrencyBook): PostingPlan
     creditLegalMinor: 0,
     allocations: allocations.map((a) => ({ ...a })),
     charges: [],
+    tipMinor: 0,
+    tipLegalMinor: 0,
   }
 }
 
@@ -903,6 +923,8 @@ function planCollection(draft: DocumentDraft, book: CurrencyBook): PostingPlan {
     creditLegalMinor: 0,
     allocations: allocations.map((a) => ({ ...a })),
     charges: [],
+    tipMinor: 0,
+    tipLegalMinor: 0,
   }
 }
 
@@ -974,6 +996,8 @@ function planDebt(draft: DocumentDraft, book: CurrencyBook): PostingPlan {
     creditLegalMinor: toLegal(amountMinor),
     allocations: [],
     charges: [],
+    tipMinor: 0,
+    tipLegalMinor: 0,
   }
 }
 
@@ -1051,6 +1075,79 @@ function planStockTransfer(draft: DocumentDraft, book: CurrencyBook): PostingPla
     creditLegalMinor: 0,
     allocations: [],
     charges: [],
+    tipMinor: 0,
+    tipLegalMinor: 0,
+  }
+}
+
+/**
+ * Producción por tandas (`PRODUCTION`): lo producido entra a la existencia de la ubicación. Cada
+ * línea lleva una cantidad positiva de un producto con existencia, sin precio; los ingredientes que
+ * se gastan salen de su receta (los agrega quien contabiliza). Sin impuestos, pagos ni total.
+ */
+function planProduction(draft: DocumentDraft, book: CurrencyBook): PostingPlan {
+  currencyOf(book, draft.currency)
+  if (draft.payments.length > 0 || (draft.creditMinor ?? 0) > 0) {
+    throw new PostingError("INVALID_PAYMENT", "Una producción no lleva pagos ni deuda")
+  }
+  if ((draft.allocations?.length ?? 0) > 0) {
+    throw new PostingError("INVALID_ALLOCATION", "Una producción no se aplica a una deuda")
+  }
+  if ((draft.charges?.length ?? 0) > 0) {
+    throw new PostingError("INVALID_LINE", "Una producción no lleva recargos")
+  }
+  if (draft.lines.length === 0) {
+    throw new PostingError("EMPTY_DOCUMENT", "Elige lo que se produce")
+  }
+  const lines: PlannedLine[] = []
+  const stockMoves: PlannedStockMove[] = []
+  draft.lines.forEach((line, i) => {
+    const n = i + 1
+    if (!Number.isSafeInteger(line.qtyMilli) || line.qtyMilli <= 0) {
+      throw new PostingError("INVALID_LINE", `Línea ${n}: la cantidad debe ser positiva`)
+    }
+    if (line.unitPriceMinor !== 0 || (line.discountMinor ?? 0) !== 0) {
+      throw new PostingError("INVALID_LINE", `Línea ${n}: una producción no lleva precio`)
+    }
+    if (!line.tracksStock) {
+      throw new PostingError("INVALID_LINE", `Línea ${n}: el producto no lleva existencia`)
+    }
+    lines.push({
+      lineNo: n,
+      variantId: line.variantId,
+      qtyMilli: line.qtyMilli,
+      unitPriceMinor: 0,
+      discountMinor: 0,
+      lineTotalMinor: 0,
+      taxId: null,
+      taxRateBp: 0,
+    })
+    stockMoves.push({
+      lineNo: n,
+      variantId: line.variantId,
+      locationId: draft.locationId,
+      qtyMilli: line.qtyMilli,
+    })
+  })
+  return {
+    lines,
+    totalMinor: 0,
+    totalLegalMinor: 0,
+    taxes: [],
+    surcharges: [],
+    surchargeMinor: 0,
+    surchargeLegalMinor: 0,
+    stockMoves,
+    accountMoves: [],
+    discountMinor: 0,
+    discountLegalMinor: 0,
+    creditMinor: 0,
+    creditCurrency: null,
+    creditLegalMinor: 0,
+    allocations: [],
+    charges: [],
+    tipMinor: 0,
+    tipLegalMinor: 0,
   }
 }
 
@@ -1062,6 +1159,13 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
   if (!isPostableType(draft.type)) {
     throw new PostingError("UNSUPPORTED_TYPE", `El tipo ${draft.type} aún no se contabiliza`)
   }
+  const tipMinor = draft.tipMinor ?? 0
+  if (!Number.isSafeInteger(tipMinor) || tipMinor < 0) {
+    throw new PostingError("INVALID_PAYMENT", "La propina debe ser un entero no negativo")
+  }
+  if (tipMinor > 0 && draft.type !== "SALE") {
+    throw new PostingError("INVALID_PAYMENT", "Solo una venta lleva propina")
+  }
   if (isCashMovement(draft.type)) return planCashMovement(draft, book)
   if (draft.type === "PAYMENT_IN") return planCollection(draft, book)
   if (draft.type === "EXPENSE") return planExpense(draft, book)
@@ -1069,6 +1173,7 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
   if (draft.type === "TRANSFER") return planTransfer(draft, book)
   if (draft.type === "DEBT_IN" || draft.type === "DEBT_OUT") return planDebt(draft, book)
   if (draft.type === "STOCK_TRANSFER") return planStockTransfer(draft, book)
+  if (draft.type === "PRODUCTION") return planProduction(draft, book)
   if ((draft.allocations?.length ?? 0) > 0 && !isReturn(draft.type)) {
     throw new PostingError(
       "INVALID_ALLOCATION",
@@ -1170,6 +1275,8 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
       creditLegalMinor: 0,
       allocations: [],
       charges: [],
+      tipMinor: 0,
+      tipLegalMinor: 0,
     }
   }
 
@@ -1230,7 +1337,13 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
   const surchargeMinor = surcharges.reduce((acc, s) => acc + s.amountMinor, 0)
   const surchargeLegalMinor = surcharges.reduce((acc, s) => acc + s.amountLegalMinor, 0)
 
-  const settlement = settle(draft.currency, totalMinor + surchargeMinor, settlementPayments, book)
+  // Los pagos cubren la venta, su IGTF y la propina.
+  const settlement = settle(
+    draft.currency,
+    totalMinor + surchargeMinor + tipMinor,
+    settlementPayments,
+    book,
+  )
   if (!settlement.settled) {
     throw new PostingError(
       "UNSETTLED",
@@ -1263,5 +1376,7 @@ export function planPosting(draft: DocumentDraft, book: CurrencyBook): PostingPl
     creditLegalMinor: toLegal(creditDocMinor),
     allocations: allocations.map((a) => ({ ...a })),
     charges,
+    tipMinor,
+    tipLegalMinor: toLegal(tipMinor),
   }
 }

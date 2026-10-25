@@ -4,6 +4,7 @@ import { MessageCircleIcon } from "lucide-react"
 import { useState } from "react"
 import { dayRange, daysBefore, todayInCaracas } from "../../lib/days"
 import { bootstrapQuery } from "../../lib/queries"
+import { useFeatures } from "../../lib/session"
 import { previousRange } from "./compare"
 import { FinanceTab } from "./FinanceTab"
 import { InventoryTab } from "./InventoryTab"
@@ -12,6 +13,7 @@ import { monthLabel } from "./monthClosingText"
 import { ResultsTab } from "./ResultsTab"
 import { SalesTab } from "./SalesTab"
 import { TaxBookTab } from "./TaxBookTab"
+import { TipsTab } from "./TipsTab"
 
 /** Meses y años que se piden más: se calculan sobre el día de hoy en Caracas. */
 function presetRange(id: string, today: string) {
@@ -40,6 +42,7 @@ const day = (date: string) => date.split("-").reverse().join("/")
 /** Informes del negocio: resultados (utilidad), ventas, inventario valorado y finanzas. */
 export function ReportsPage() {
   const boot = useQuery(bootstrapQuery)
+  const features = useFeatures()
   const today = todayInCaracas()
   const [range, setRange] = useState(() => presetRange("month", today))
   const bounds = { from: dayRange(range.from).from, to: dayRange(range.to).to }
@@ -98,6 +101,11 @@ export function ReportsPage() {
           <TabsTrigger value="finanzas" className="h-8">
             Finanzas
           </TabsTrigger>
+          {features.tips ? (
+            <TabsTrigger value="propinas" className="h-8">
+              Propinas
+            </TabsTrigger>
+          ) : null}
         </TabsList>
 
         <TabsContent value="resultados" className="grid grid-cols-1 gap-4">
@@ -122,6 +130,12 @@ export function ReportsPage() {
         <TabsContent value="finanzas">
           <FinanceTab business={business} today={day(today)} />
         </TabsContent>
+        {features.tips ? (
+          <TabsContent value="propinas" className="grid grid-cols-1 gap-4">
+            <Period range={range} setRange={setRange} today={today} preset={preset?.id} />
+            {valid ? <TipsTab bounds={bounds} period={period} business={business} /> : null}
+          </TabsContent>
+        ) : null}
       </Tabs>
     </div>
   )

@@ -18,6 +18,12 @@ const ALL_FEATURES: Features = {
   payables: true,
   locations: false,
   lots: false,
+  variants: false,
+  tables: false,
+  modifiers: false,
+  kitchen: false,
+  recipes: false,
+  tips: false,
 }
 
 /** Las funciones que usa el comercio; mientras carga, las de siempre (como antes de poder apagarlas). */

@@ -1,7 +1,6 @@
 import type { CatalogItem } from "@millhiore/contracts"
 import { lineTotal } from "@millhiore/domain"
 import {
-  Badge,
   Button,
   Card,
   cn,
@@ -10,11 +9,10 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  Input,
   NativeSelect,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
-import { Link } from "@tanstack/react-router"
+import { Link, useNavigate } from "@tanstack/react-router"
 import {
   ArchiveIcon,
   ArrowLeftRightIcon,
@@ -28,8 +26,8 @@ import {
   PercentIcon,
   PlayIcon,
   PlusIcon,
-  SearchIcon,
   ShoppingCartIcon,
+  SquareMenuIcon,
   TicketPercentIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -37,25 +35,23 @@ import {
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
-import { ScanButton } from "../../components/CameraScanner"
 import { TerminalPicker } from "../../components/TerminalPicker"
 import { formatMoney, formatPercent, formatQty, formatTime } from "../../lib/format"
 import { stockAt } from "../../lib/locations"
 import { openDrawer } from "../../lib/printing"
 import {
   bootstrapQuery,
-  categoriesQuery,
   currentShiftQuery,
   productsQuery,
   rateStatusQuery,
 } from "../../lib/queries"
-import { findByCode } from "../../lib/scanner"
 import { can, useFeatures, useMe } from "../../lib/session"
 import { useTerminal } from "../../lib/terminal"
 import { QuoteDialog } from "../quotes/QuoteDialog"
 import { SaveQuoteDialog } from "../quotes/SaveQuoteDialog"
 import { ReceiptDialog } from "../sales/ReceiptDialog"
 import { CashMoveDialog, CloseShiftDialog, OpenShiftCard } from "../shifts/ShiftDialogs"
+import { CatalogPanel, finePointer } from "./CatalogPanel"
 import { ChargeAmountDialog } from "./ChargeAmountDialog"
 import { CheckoutDialog } from "./CheckoutDialog"
 import {
@@ -64,20 +60,14 @@ import {
   type CartLine,
   convertMinor,
   type DiscountSpec,
+  lineKey,
   makeContext,
   type PosContext,
-  priceWithList,
-  unitPriceInDoc,
 } from "./compute"
 import { DiscountCodeDialog } from "./DiscountCodeDialog"
 import { DiscountDialog } from "./DiscountDialog"
+import { ModifierDialog, modifiersText } from "./ModifierDialog"
 import { type HeldTicket, type TicketLine, usePos } from "./store"
-
-/**
- * Con mouse (o lector de códigos) la búsqueda vuelve a tener el foco tras cada producto; en una
- * pantalla táctil eso abriría el teclado en cada toque.
- */
-const finePointer = typeof window !== "undefined" && window.matchMedia?.("(pointer: fine)").matches
 
 /** Ventas aparcadas: cuánto suman hoy y con qué productos, para retomarlas o descartarlas. */
 function HeldDialog({ ctx, onClose }: { ctx: PosContext; onClose: () => void }) {
@@ -141,13 +131,6 @@ function HeldDialog({ ctx, onClose }: { ctx: PosContext; onClose: () => void }) 
   )
 }
 
-function normalize(s: string): string {
-  return s
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-}
-
 export function PosPage() {
   const me = useMe()
   const boot = useQuery(bootstrapQuery)
@@ -171,7 +154,11 @@ export function PosPage() {
     setCharges,
     quote,
     detachQuote,
+    tab,
   } = usePos()
+  const navigate = useNavigate()
+  // Tras cobrar una mesa, al cerrar el recibo se vuelve a las mesas.
+  const [backToTables, setBackToTables] = useState(false)
   const [savingQuote, setSavingQuote] = useState(false)
   const [quoteShown, setQuoteShown] = useState<string | null>(null)
   const [editingCharge, setEditingCharge] = useState<string | null>(null)
@@ -180,9 +167,10 @@ export function PosPage() {
   const saleDiscountUsed = saleDiscount?.code || canDiscount ? saleDiscount : null
   const [askingCode, setAskingCode] = useState(false)
   const features = useFeatures()
-  const [discountFor, setDiscountFor] = useState<{ variantId: string | null } | null>(null)
+  const [discountFor, setDiscountFor] = useState<{ key: string | null } | null>(null)
+  // Producto con opciones y extras: se eligen antes de agregarlo.
+  const [choosing, setChoosing] = useState<CatalogItem | null>(null)
   const [heldOpen, setHeldOpen] = useState(false)
-  const [search, setSearch] = useState("")
   const [checkoutOpen, setCheckoutOpen] = useState(false)
   const [receiptId, setReceiptId] = useState<string | null>(null)
   const [dialog, setDialog] = useState<"cash" | "close" | null>(null)
@@ -214,54 +202,13 @@ export function PosPage() {
         : [...activeCharges, { chargeId }],
     )
 
-  const categories = useQuery(categoriesQuery())
-  const [category, setCategory] = useState("")
-  // Solo se ofrecen las categorías que tienen productos a la venta (y «Sin categoría» si hay).
-  const chips = useMemo(() => {
-    const items = products.data ?? []
-    const used = new Set(items.map((p) => p.categoryId))
-    return {
-      list: (categories.data ?? []).filter((c) => used.has(c.id)),
-      hasNone: used.has(null) && used.size > 1,
-    }
-  }, [products.data, categories.data])
-  // Si la categoría elegida deja de existir (se desactivó o ya no tiene productos), vuelve «Todas».
-  const activeCategory =
-    category === "none"
-      ? chips.hasNone
-        ? "none"
-        : ""
-      : chips.list.some((c) => c.id === category)
-        ? category
-        : ""
-
-  const filtered = useMemo(() => {
-    const all = products.data ?? []
-    const q = normalize(search.trim())
-    // Buscar escribiendo recorre todo el catálogo; las categorías solo filtran sin búsqueda.
-    if (!q) {
-      return activeCategory === "none"
-        ? all.filter((p) => p.categoryId === null)
-        : activeCategory
-          ? all.filter((p) => p.categoryId === activeCategory)
-          : all
-    }
-    return all.filter(
-      (p) =>
-        normalize(p.name).includes(q) || p.sku.toLowerCase() === q || p.barcode === search.trim(),
-    )
-  }, [products.data, search, activeCategory])
-
   const canCharge =
     cart !== null && cart.lines.length > 0 && !cart.missingRate && cart.ticket.totalMinor > 0
 
-  // F2 busca, F12 cobra, Esc limpia la búsqueda.
+  // F12 cobra.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "F2") {
-        e.preventDefault()
-        searchRef.current?.focus()
-      } else if (e.key === "F12" && canCharge) {
+      if (e.key === "F12" && canCharge) {
         e.preventDefault()
         setCheckoutOpen(true)
       }
@@ -271,59 +218,17 @@ export function PosPage() {
   }, [canCharge])
 
   const addItem = (item: CatalogItem) => {
+    // Lo de una mesa se pide en la mesa: aquí solo se cobra.
+    if (tab) {
+      toast.info(`Para agregar productos, vuelve a ${tab.label}`)
+      return
+    }
     const expired = terminal && item.expiry?.expiredByLocation[terminal.locationId]
     if (terminal && expired && stockAt(item, terminal.locationId) - expired <= 0) {
       toast.warning(`Lo que queda de ${item.name} está vencido: revisa antes de venderlo`)
     }
-    add(item)
-    setSearch("")
-    if (finePointer) searchRef.current?.focus()
-  }
-
-  // Lector de códigos USB sin foco: teclea como un teclado, pero en ráfaga (pocos ms entre
-  // teclas) y termina con Enter. Así se escanea aunque el cursor no esté en el buscador.
-  const scan = useRef({ code: "", last: 0 })
-  const busy = checkoutOpen || dialog !== null || receiptId !== null || heldOpen
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (busy) return
-      const target = e.target as HTMLElement | null
-      if (target?.closest("input, textarea, select, [contenteditable='true']")) return
-      const now = performance.now()
-      const s = scan.current
-      if (e.key === "Enter") {
-        if (s.code.length >= 4 && now - s.last < 100) {
-          e.preventDefault()
-          const code = s.code
-          const item = products.data?.find(
-            (p) => p.barcode === code || p.sku.toLowerCase() === code.toLowerCase(),
-          )
-          if (item) addItem(item)
-          else toast.error(`No hay ningún producto con el código ${code}`)
-        }
-        s.code = ""
-        return
-      }
-      if (e.key.length !== 1 || e.ctrlKey || e.altKey || e.metaKey) return
-      if (now - s.last > 50) s.code = ""
-      s.code += e.key
-      s.last = now
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  })
-
-  // Enter en la búsqueda: código de barras/SKU exacto, o el único resultado.
-  const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Escape") setSearch("")
-    if (e.key !== "Enter") return
-    const term = search.trim()
-    if (!term) return
-    const exact = products.data?.find(
-      (p) => p.barcode === term || p.sku.toLowerCase() === term.toLowerCase(),
-    )
-    const pick = exact ?? (filtered.length === 1 ? filtered[0] : undefined)
-    if (pick) addItem(pick)
+    if (features.modifiers && item.modifierGroupIds.length) setChoosing(item)
+    else add(item)
   }
 
   if (!ctx || !cart || !boot.data || !terminal || !terminalId || shift.isPending) {
@@ -338,6 +243,8 @@ export function PosPage() {
   const doc = ctx.docCurrency
   const ref = ctx.refCurrency
   const toRef = (minor: number) => convertMinor(ctx, minor, doc, ref)
+  const busy =
+    checkoutOpen || dialog !== null || receiptId !== null || heldOpen || choosing !== null
 
   return (
     <div
@@ -347,122 +254,28 @@ export function PosPage() {
       )}
     >
       {/* Catálogo */}
-      <section className="flex min-h-0 flex-col gap-3">
-        {!ctx.rate ? (
-          <div className="flex items-center gap-2 rounded-lg border border-warning/50 bg-warning/15 p-3 text-sm">
-            <TriangleAlertIcon className="size-4 shrink-0" />
-            No hay tasa del día: no se pueden convertir precios en divisas.
-            {can(me, "rate.manage") ? (
-              <Link to="/ajustes" className="font-medium underline">
-                Cargar tasa
-              </Link>
-            ) : null}
-          </div>
-        ) : null}
-        <div className="relative">
-          <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-5 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            ref={searchRef}
-            autoFocus={finePointer}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={onSearchKey}
-            placeholder={
-              finePointer ? "Buscar producto o escanear código (F2)" : "Buscar producto o código"
-            }
-            className="h-12 pr-12 pl-10 text-base"
-            aria-label="Buscar producto"
-          />
-          {/* Escanear con la cámara del celular o la PC; sigue leyendo hasta cerrarlo. */}
-          <ScanButton
-            continuous
-            className="absolute top-1/2 right-1.5 size-9 -translate-y-1/2 border-0 shadow-none"
-            onCode={(code) => {
-              const item = findByCode(products.data ?? [], code)
-              if (!item) {
-                toast.error(`No hay ningún producto con el código ${code}`)
-                return
-              }
-              addItem(item)
-              toast.success(`${item.name} agregado`)
-            }}
-          />
-        </div>
-        {chips.list.length ? (
-          <div
-            className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1"
-            role="tablist"
-            aria-label="Categorías"
-          >
-            {[
-              { id: "", name: "Todas" },
-              ...chips.list,
-              ...(chips.hasNone ? [{ id: "none", name: "Sin categoría" }] : []),
-            ].map((c) => (
-              <Button
-                key={c.id || "all"}
-                role="tab"
-                aria-selected={activeCategory === c.id}
-                variant={activeCategory === c.id ? "default" : "outline"}
-                size="sm"
-                className="shrink-0 rounded-full"
-                onClick={() => setCategory(c.id)}
-              >
-                {c.name}
-              </Button>
-            ))}
-          </div>
-        ) : null}
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {products.data?.length === 0 ? (
-            <div className="grid place-items-center gap-2 rounded-xl border border-dashed p-10 text-center text-muted-foreground">
-              <p>Aún no hay productos.</p>
-              {can(me, "catalog.manage") ? (
-                <Button asChild variant="outline">
-                  <Link to="/productos">Crear productos</Link>
-                </Button>
+      <CatalogPanel
+        ctx={ctx}
+        products={products.data}
+        priceListId={priceListId}
+        locationId={terminal.locationId}
+        onAdd={addItem}
+        paused={busy}
+        searchRef={searchRef}
+        banner={
+          !ctx.rate ? (
+            <div className="flex items-center gap-2 rounded-lg border border-warning/50 bg-warning/15 p-3 text-sm">
+              <TriangleAlertIcon className="size-4 shrink-0" />
+              No hay tasa del día: no se pueden convertir precios en divisas.
+              {can(me, "rate.manage") ? (
+                <Link to="/ajustes" className="font-medium underline">
+                  Cargar tasa
+                </Link>
               ) : null}
             </div>
-          ) : null}
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
-            {filtered.map((p) => {
-              const price = priceWithList(ctx, priceListId, p.variantId, p)
-              const unit = unitPriceInDoc(ctx, price.priceMinor, price.priceCurrency)
-              return (
-                <button
-                  key={p.variantId}
-                  type="button"
-                  onClick={() => addItem(p)}
-                  className="flex min-h-24 cursor-pointer flex-col justify-between gap-2 rounded-xl border bg-card p-3 text-left shadow-xs transition-colors hover:border-primary hover:bg-accent/50 active:scale-[0.99]"
-                >
-                  <span className="line-clamp-2 font-medium leading-tight">{p.name}</span>
-                  <span className="flex items-end justify-between gap-2">
-                    <span className="grid">
-                      <span className="tabular font-semibold">
-                        {unit === null ? "—" : formatMoney(unit, doc)}
-                      </span>
-                      {price.priceCurrency !== doc ? (
-                        <span className="tabular text-muted-foreground text-xs">
-                          {formatMoney(price.priceMinor, price.priceCurrency)}
-                        </span>
-                      ) : null}
-                    </span>
-                    {p.tracksStock ? (
-                      // La caja vende de su ubicación: muestra lo que hay ahí.
-                      <Badge
-                        variant={stockAt(p, terminal.locationId) > 0 ? "secondary" : "warning"}
-                        className="tabular"
-                      >
-                        {formatQty(stockAt(p, terminal.locationId))}
-                      </Badge>
-                    ) : null}
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      </section>
+          ) : null
+        }
+      />
 
       {/* Ticket */}
       <Card
@@ -503,7 +316,7 @@ export function PosPage() {
             ) : null}
             {lines.length ? (
               <>
-                {features.quotes ? (
+                {features.quotes && !tab && !lines.some((l) => l.modifiers?.length) ? (
                   <Button
                     variant="ghost"
                     size="sm"
@@ -549,7 +362,28 @@ export function PosPage() {
             </Button>
           </div>
         ) : null}
-        {ctx.priceLists.size && !quote ? (
+        {tab ? (
+          <div className="flex flex-wrap items-center gap-2 border-b bg-primary/5 px-4 py-2 text-sm">
+            <SquareMenuIcon className="size-4 shrink-0 text-primary" />
+            <span className="min-w-0 flex-1">
+              Cobrando <span className="font-medium">{tab.label}</span> · {tab.number}
+              <span className="block text-muted-foreground text-xs">
+                Lo que se pide se agrega en la mesa
+              </span>
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                reset()
+                void navigate({ to: "/mesas/$tabId", params: { tabId: tab.id } })
+              }}
+            >
+              Volver a la mesa
+            </Button>
+          </div>
+        ) : null}
+        {ctx.priceLists.size && !quote && !tab ? (
           <div className="flex items-center gap-2 border-b px-4 py-2 text-sm">
             <label htmlFor="pos-price-list" className="text-muted-foreground">
               Precios
@@ -576,8 +410,18 @@ export function PosPage() {
             </li>
           ) : null}
           {cart.lines.map((l, i) => (
-            <li key={l.variantId} className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 px-4 py-2.5">
-              <span className="font-medium leading-tight">{l.name}</span>
+            <li
+              key={`${l.key}-${l.unitPriceMinor}`}
+              className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 px-4 py-2.5"
+            >
+              <span className="min-w-0 font-medium leading-tight">
+                {l.name}
+                {modifiersText(l.modifiers, l.note) ? (
+                  <span className="block font-normal text-muted-foreground text-xs">
+                    {modifiersText(l.modifiers, l.note)}
+                  </span>
+                ) : null}
+              </span>
               <span className="tabular text-right font-semibold">
                 {formatMoney(cart.ticket.lineTotals[i] ?? 0, doc)}
                 {l.discountMinor ? (
@@ -587,23 +431,31 @@ export function PosPage() {
                 ) : null}
               </span>
               <span className="flex items-center gap-1">
-                <Button
-                  variant="outline"
-                  size="icon-sm"
-                  onClick={() => setQty(l.variantId, l.qtyMilli - 1000)}
-                  aria-label={`Quitar uno de ${l.name}`}
-                >
-                  <MinusIcon />
-                </Button>
-                <span className="tabular w-10 text-center text-sm">{formatQty(l.qtyMilli)}</span>
-                <Button
-                  variant="outline"
-                  size="icon-sm"
-                  onClick={() => setQty(l.variantId, l.qtyMilli + 1000)}
-                  aria-label={`Agregar uno de ${l.name}`}
-                >
-                  <PlusIcon />
-                </Button>
+                {tab ? (
+                  <span className="tabular text-sm">{formatQty(l.qtyMilli)}</span>
+                ) : (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="icon-sm"
+                      onClick={() => setQty(lineKey(l), l.qtyMilli - 1000)}
+                      aria-label={`Quitar uno de ${l.name}`}
+                    >
+                      <MinusIcon />
+                    </Button>
+                    <span className="tabular w-10 text-center text-sm">
+                      {formatQty(l.qtyMilli)}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="icon-sm"
+                      onClick={() => setQty(lineKey(l), l.qtyMilli + 1000)}
+                      aria-label={`Agregar uno de ${l.name}`}
+                    >
+                      <PlusIcon />
+                    </Button>
+                  </>
+                )}
                 <span className="tabular ml-2 text-muted-foreground text-xs">
                   × {formatMoney(l.unitPriceMinor, doc)}
                 </span>
@@ -614,22 +466,24 @@ export function PosPage() {
                     variant="ghost"
                     size="icon-sm"
                     className={lines[i]?.discount ? "text-success" : "text-muted-foreground"}
-                    onClick={() => setDiscountFor({ variantId: l.variantId })}
+                    onClick={() => setDiscountFor({ key: lineKey(l) })}
                     aria-label={`Descuento a ${l.name}`}
                     title="Descuento a este producto"
                   >
                     <PercentIcon />
                   </Button>
                 ) : null}
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="text-muted-foreground"
-                  onClick={() => remove(l.variantId)}
-                  aria-label={`Eliminar ${l.name}`}
-                >
-                  <Trash2Icon />
-                </Button>
+                {tab ? null : (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-muted-foreground"
+                    onClick={() => remove(lineKey(l))}
+                    aria-label={`Eliminar ${l.name}`}
+                  >
+                    <Trash2Icon />
+                  </Button>
+                )}
               </span>
             </li>
           ))}
@@ -722,7 +576,7 @@ export function PosPage() {
                   variant="ghost"
                   size="sm"
                   className="px-2 text-muted-foreground"
-                  onClick={() => setDiscountFor({ variantId: null })}
+                  onClick={() => setDiscountFor({ key: null })}
                 >
                   <PercentIcon />{" "}
                   {saleDiscount && !saleDiscount.code
@@ -785,6 +639,7 @@ export function PosPage() {
           onClose={() => setCheckoutOpen(false)}
           onPosted={(id) => {
             setCheckoutOpen(false)
+            setBackToTables(tab !== null)
             reset()
             setReceiptId(id)
           }}
@@ -831,6 +686,18 @@ export function PosPage() {
           onClose={() => setEditingCharge(null)}
         />
       ) : null}
+      {choosing ? (
+        <ModifierDialog
+          item={choosing}
+          groups={boot.data.modifierGroups}
+          ctx={ctx}
+          onClose={() => setChoosing(null)}
+          onConfirm={(extras) => {
+            add(choosing, 1000, extras)
+            setChoosing(null)
+          }}
+        />
+      ) : null}
       {discountFor ? (
         <DiscountForm
           ctx={ctx}
@@ -838,7 +705,7 @@ export function PosPage() {
           cartLines={cart.lines}
           priceListId={priceListId}
           saleDiscount={saleDiscount}
-          target={discountFor.variantId}
+          target={discountFor.key}
           onLine={setLineDiscount}
           onSale={setSaleDiscount}
           onClose={() => setDiscountFor(null)}
@@ -848,7 +715,10 @@ export function PosPage() {
         documentId={receiptId}
         onClose={() => {
           setReceiptId(null)
-          if (finePointer) searchRef.current?.focus()
+          if (backToTables) {
+            setBackToTables(false)
+            void navigate({ to: "/mesas" })
+          } else if (finePointer) searchRef.current?.focus()
         }}
       />
 
@@ -903,7 +773,7 @@ function DiscountForm({
   priceListId: string | null
   saleDiscount: DiscountSpec | null
   target: string | null
-  onLine: (variantId: string, spec: DiscountSpec | null) => void
+  onLine: (key: string, spec: DiscountSpec | null) => void
   onSale: (spec: DiscountSpec | null) => void
   onClose: () => void
 }) {
@@ -926,7 +796,7 @@ function DiscountForm({
       />
     )
   }
-  const i = lines.findIndex((l) => l.variantId === target)
+  const i = lines.findIndex((l) => lineKey(l) === target)
   const line = lines[i]
   const priced = cartLines[i]
   if (!(line && priced)) return null

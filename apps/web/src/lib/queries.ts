@@ -6,6 +6,7 @@ import type {
   Category,
   Contact,
   DaySummary,
+  DiningFloor,
   DiscountCode,
   DocumentDetail,
   DocumentSummary,
@@ -14,12 +15,18 @@ import type {
   Expenses,
   FiscalSettingsBody,
   InventoryReport,
+  KitchenStation,
+  KitchenTicket,
+  LabelSettings,
   Lots,
   Me,
+  ModifierGroup,
   Onboarding,
   Payables,
   PaymentMethodRow,
   PriceList,
+  ProductDetail,
+  ProductionRow,
   QuoteDetail,
   QuoteSummary,
   Receivables,
@@ -34,8 +41,10 @@ import type {
   StockAdjustments,
   StockLocation,
   StockReason,
+  TabDetail,
   TaxBook,
   TerminalInfo,
+  TipsReport,
   TransferRow,
 } from "@millhiore/contracts"
 import { QueryClient, queryOptions } from "@tanstack/react-query"
@@ -123,6 +132,19 @@ export const productsQuery = (opts: { all?: boolean } = {}) =>
   queryOptions({
     queryKey: ["products", opts.all ? "all" : "active"],
     queryFn: () => api<CatalogItem[]>(`/api/products${opts.all ? "?all=true" : ""}`),
+  })
+
+/** Cómo se imprimen las etiquetas con código de barras (papel, tamaño, precio). */
+export const labelSettingsQuery = queryOptions({
+  queryKey: ["settings", "labels"],
+  queryFn: () => api<LabelSettings>("/api/settings/labels"),
+})
+
+/** Un producto con todas sus tallas y colores (también los desactivados). */
+export const productDetailQuery = (productId: string) =>
+  queryOptions({
+    queryKey: ["products", "detail", productId],
+    queryFn: () => api<ProductDetail>(`/api/products/${productId}`),
   })
 
 export const documentsQuery = (params: { type: string; from?: number; to?: number }) =>
@@ -351,6 +373,14 @@ export const stockAdjustmentsQuery = (params: { from: number; to: number; reason
 
 const rangeQuery = (b: { from: number; to: number }) => `from=${b.from}&to=${b.to}`
 
+/** Lo producido por tandas en un período. */
+export const productionQuery = (bounds: { from: number; to: number }) =>
+  queryOptions({
+    queryKey: ["production", bounds],
+    queryFn: () => api<ProductionRow[]>(`/api/production?${rangeQuery(bounds)}`),
+    staleTime: 0,
+  })
+
 /** Estado de resultados de un período (ventas, costo, gastos, utilidad). */
 export const resultsReportQuery = (bounds: { from: number; to: number }) =>
   queryOptions({
@@ -364,6 +394,14 @@ export const salesReportQuery = (bounds: { from: number; to: number }) =>
   queryOptions({
     queryKey: ["reports", "sales", bounds],
     queryFn: () => api<SalesReport>(`/api/reports/sales?${rangeQuery(bounds)}`),
+    staleTime: 0,
+  })
+
+/** Propinas de un período por quien las recibe. */
+export const tipsReportQuery = (bounds: { from: number; to: number }) =>
+  queryOptions({
+    queryKey: ["reports", "tips", bounds],
+    queryFn: () => api<TipsReport>(`/api/reports/tips?${rangeQuery(bounds)}`),
     staleTime: 0,
   })
 
@@ -460,6 +498,52 @@ export const quoteQuery = (id: string) =>
     queryFn: () => api<QuoteDetail>(`/api/quotes/${id}`),
     staleTime: 0,
   })
+
+/**
+ * El plano de mesas. Se actualiza solo cada pocos segundos: otro mesonero pudo abrir una cuenta
+ * o cobrarla desde otro equipo.
+ */
+export const diningQuery = queryOptions({
+  queryKey: ["dining"],
+  queryFn: () => api<DiningFloor>("/api/dining"),
+  staleTime: 0,
+  refetchInterval: 5000,
+})
+
+export const tabQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["tabs", id],
+    queryFn: () => api<TabDetail>(`/api/tabs/${id}`),
+    staleTime: 0,
+    refetchInterval: 5000,
+  })
+
+/** Estaciones de la cocina (cocina, barra…), también las desactivadas. */
+export const kitchenStationsQuery = queryOptions({
+  queryKey: ["kitchen", "stations"],
+  queryFn: () => api<KitchenStation[]>("/api/kitchen/stations?all=true"),
+  staleTime: 0,
+})
+
+/** Comandas de una estación (o de todas); la pantalla de cocina se actualiza sola. */
+export const kitchenTicketsQuery = (stationId: string, status: "pending" | "ready") =>
+  queryOptions({
+    queryKey: ["kitchen", "tickets", stationId, status],
+    queryFn: () => {
+      const q = new URLSearchParams({ status })
+      if (stationId) q.set("stationId", stationId)
+      return api<KitchenTicket[]>(`/api/kitchen/tickets?${q}`)
+    },
+    staleTime: 0,
+    refetchInterval: 3000,
+  })
+
+/** Grupos de opciones y extras, también los desactivados. */
+export const modifierGroupsQuery = queryOptions({
+  queryKey: ["modifier-groups"],
+  queryFn: () => api<ModifierGroup[]>("/api/modifier-groups"),
+  staleTime: 0,
+})
 
 /** Guía para arrancar: los primeros pasos del comercio y cuáles faltan. */
 export const onboardingQuery = queryOptions({

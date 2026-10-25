@@ -21,7 +21,7 @@ import {
   variant,
 } from "@millhiore/db"
 import { DOCUMENT_TYPES, type DocumentType } from "@millhiore/domain"
-import { and, asc, desc, eq, gte, inArray, lt, sql } from "drizzle-orm"
+import { and, asc, desc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm"
 import { alias } from "drizzle-orm/sqlite-core"
 import { HttpError } from "../../http/errors"
 
@@ -30,6 +30,8 @@ const reversal = alias(document, "reversal")
 const returned = alias(document, "returned")
 /** Adónde llegó un traslado. */
 const destination = alias(location, "destination")
+/** Para quién fue la propina. */
+const tipUser = alias(user, "tip_user")
 
 const summaryColumns = {
   id: document.id,
@@ -58,6 +60,10 @@ const summaryColumns = {
   expenseCategoryName: expenseCategory.name,
   stockReasonId: document.stockReasonId,
   stockReasonName: stockReason.name,
+  tipMinor: document.tipMinor,
+  tipLegalMinor: document.tipLegalMinor,
+  tipUserId: document.tipUserId,
+  tipUserName: tipUser.name,
   creditMinor: document.creditMinor,
   creditCurrency: document.creditCurrency,
   dueAt: document.dueAt,
@@ -103,6 +109,7 @@ export function listDocuments(
     .innerJoin(terminal, eq(terminal.id, document.terminalId))
     .innerJoin(location, eq(location.id, document.locationId))
     .leftJoin(destination, eq(destination.id, document.toLocationId))
+    .leftJoin(tipUser, eq(tipUser.id, document.tipUserId))
     .leftJoin(discountCode, eq(discountCode.id, document.discountCodeId))
     .where(filters.length ? and(...filters) : undefined)
     .orderBy(desc(document.postedAt), desc(document.id))
@@ -130,6 +137,7 @@ export function getDocument(db: Db, id: string): DocumentDetail {
     .innerJoin(terminal, eq(terminal.id, document.terminalId))
     .innerJoin(location, eq(location.id, document.locationId))
     .leftJoin(destination, eq(destination.id, document.toLocationId))
+    .leftJoin(tipUser, eq(tipUser.id, document.tipUserId))
     .leftJoin(discountCode, eq(discountCode.id, document.discountCodeId))
     .where(eq(document.id, id))
     .get()
@@ -147,6 +155,8 @@ export function getDocument(db: Db, id: string): DocumentDetail {
       lineTotalMinor: documentLine.lineTotalMinor,
       taxId: documentLine.taxId,
       taxRateBp: documentLine.taxRateBp,
+      modifiers: documentLine.modifiers,
+      note: documentLine.note,
     })
     .from(documentLine)
     .innerJoin(variant, eq(variant.id, documentLine.variantId))
@@ -229,7 +239,8 @@ export function getDocument(db: Db, id: string): DocumentDetail {
     .orderBy(asc(sale.postedAt), asc(sale.id))
     .all()
 
-  // Los lotes que movió cada línea; en un traslado, los que salieron del origen.
+  // Los lotes que movió cada línea (de su producto, no de sus ingredientes); en un traslado, los
+  // que salieron del origen.
   const lotMoves = db
     .select({
       lineId: stockMove.documentLineId,
@@ -244,6 +255,7 @@ export function getDocument(db: Db, id: string): DocumentDetail {
     .where(
       and(
         eq(stockMove.documentId, id),
+        eq(stockMove.variantId, documentLine.variantId),
         summary.type === "STOCK_TRANSFER"
           ? eq(stockMove.locationId, summary.locationId)
           : undefined,
@@ -251,6 +263,22 @@ export function getDocument(db: Db, id: string): DocumentDetail {
     )
     .groupBy(stockMove.documentLineId, lot.id)
     .orderBy(asc(lot.expiresOn))
+    .all()
+  // Lo que se gastó de cada ingrediente (receta de un plato vendido o de una producción).
+  const ingredient = alias(variant, "ingredient")
+  const ingredientMoves = db
+    .select({
+      lineId: stockMove.documentLineId,
+      variantId: ingredient.id,
+      name: ingredient.name,
+      qtyMilli: sql<number>`sum(abs(${stockMove.qtyMilli}))`,
+    })
+    .from(stockMove)
+    .innerJoin(documentLine, eq(documentLine.id, stockMove.documentLineId))
+    .innerJoin(ingredient, eq(ingredient.id, stockMove.variantId))
+    .where(and(eq(stockMove.documentId, id), ne(stockMove.variantId, documentLine.variantId)))
+    .groupBy(stockMove.documentLineId, ingredient.id)
+    .orderBy(sql`min(${stockMove}.rowid)`)
     .all()
   const lineNoOf = new Map(
     db
@@ -269,9 +297,13 @@ export function getDocument(db: Db, id: string): DocumentDetail {
         : null,
     lines: lines.map((l) => ({
       ...l,
+      modifiers: l.modifiers ?? [],
       lots: lotMoves
         .filter((m) => lineNoOf.get(m.lineId) === l.lineNo)
         .map(({ lotId, code, expiresOn, qtyMilli }) => ({ lotId, code, expiresOn, qtyMilli })),
+      ingredients: ingredientMoves
+        .filter((m) => lineNoOf.get(m.lineId) === l.lineNo)
+        .map(({ variantId, name, qtyMilli }) => ({ variantId, name, qtyMilli })),
     })),
     payments,
     taxes,

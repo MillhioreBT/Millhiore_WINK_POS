@@ -341,7 +341,7 @@ export function lowStock(db: Db): NonNullable<DaySummary["lowStock"]> {
     .select({
       productId: product.id,
       variantId: variant.id,
-      name: product.name,
+      name: variant.name,
       stockMilli: stock,
       minStockMilli: variant.minStockMilli,
     })
@@ -350,11 +350,12 @@ export function lowStock(db: Db): NonNullable<DaySummary["lowStock"]> {
     .where(
       and(
         eq(product.active, true),
+        eq(variant.active, true),
         eq(product.tracksStock, true),
         sql`${stock} <= coalesce(${variant.minStockMilli}, 0)`,
       ),
     )
-    .orderBy(asc(stock), asc(product.name))
+    .orderBy(asc(stock), asc(variant.name))
     .limit(50)
     .all()
 }

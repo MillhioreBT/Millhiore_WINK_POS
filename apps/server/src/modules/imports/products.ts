@@ -26,7 +26,13 @@ interface Plan {
   row: number
   name: string
   /** El producto existente que se actualiza; null = se crea. */
-  existing: { productId: string; variantId: string; tracksStock: boolean } | null
+  existing: {
+    productId: string
+    variantId: string
+    tracksStock: boolean
+    /** Una talla y color de un producto: el nombre del producto no se cambia desde una fila. */
+    hasOptions: boolean
+  } | null
   kind: "good" | "service"
   priceMinor: number | undefined
   priceCurrency: string | undefined
@@ -89,14 +95,8 @@ export function importProducts(
           .all()
           .map((c) => [key(c.name), c]),
       )
-      const bySku = new Map<
-        string,
-        { productId: string; variantId: string; tracksStock: boolean }
-      >()
-      const byBarcode = new Map<
-        string,
-        { productId: string; variantId: string; tracksStock: boolean }
-      >()
+      const bySku = new Map<string, NonNullable<Plan["existing"]>>()
+      const byBarcode = new Map<string, NonNullable<Plan["existing"]>>()
       for (const v of tx
         .select({
           variantId: variant.id,
@@ -104,11 +104,17 @@ export function importProducts(
           sku: variant.sku,
           barcode: variant.barcode,
           tracksStock: product.tracksStock,
+          optionValues: variant.optionValues,
         })
         .from(variant)
         .innerJoin(product, eq(product.id, variant.productId))
         .all()) {
-        const ref = { productId: v.productId, variantId: v.variantId, tracksStock: v.tracksStock }
+        const ref = {
+          productId: v.productId,
+          variantId: v.variantId,
+          tracksStock: v.tracksStock,
+          hasOptions: v.optionValues !== null,
+        }
         bySku.set(v.sku.toLowerCase(), ref)
         if (v.barcode) byBarcode.set(v.barcode, ref)
       }
@@ -298,13 +304,15 @@ function apply(
   for (const p of plans) {
     const categoryId = p.categoryKey ? (categories.get(p.categoryKey)?.id ?? null) : undefined
     if (p.existing) {
+      // La fila de una talla y color describe esa combinación: el nombre se cambia en la app.
+      const rename = p.name && !p.existing.hasOptions ? { name: p.name } : {}
       const productSet = {
-        ...(p.name ? { name: p.name } : {}),
+        ...rename,
         ...(p.taxId !== undefined ? { taxId: p.taxId } : {}),
         ...(categoryId !== undefined ? { categoryId } : {}),
       }
       const variantSet = {
-        ...(p.name ? { name: p.name } : {}),
+        ...rename,
         ...(p.priceMinor !== undefined ? { priceMinor: p.priceMinor } : {}),
         ...(p.priceCurrency ? { priceCurrency: p.priceCurrency } : {}),
         ...(p.barcode ? { barcode: p.barcode } : {}),

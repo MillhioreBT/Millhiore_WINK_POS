@@ -23,8 +23,8 @@ const DISMISSED_KEY = "onboarding.dismissed"
 
 /**
  * Lo que ya existía, encendido mientras el comercio no diga otra cosa (así funcionaban antes de
- * poder apagarlas); varias ubicaciones y lotes, apagadas: la mayoría vende de un solo sitio y
- * no lleva vencimientos.
+ * poder apagarlas); varias ubicaciones, lotes, tallas y colores, mesas y opciones, apagadas: la
+ * mayoría vende de un solo sitio, no lleva vencimientos, no vende ropa ni atiende mesas.
  */
 const DEFAULT_FEATURES: Features = {
   quotes: true,
@@ -34,6 +34,12 @@ const DEFAULT_FEATURES: Features = {
   payables: true,
   locations: false,
   lots: false,
+  variants: false,
+  tables: false,
+  modifiers: false,
+  kitchen: false,
+  recipes: false,
+  tips: false,
 }
 
 export function features(db: Pick<Db, "select">): Features {

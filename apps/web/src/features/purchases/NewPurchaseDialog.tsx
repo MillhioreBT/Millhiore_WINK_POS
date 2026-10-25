@@ -18,6 +18,7 @@ import { Trash2Icon } from "lucide-react"
 import { useMemo, useState } from "react"
 import { toast } from "sonner"
 import { ScanButton } from "../../components/CameraScanner"
+import { groupByProduct } from "../../components/VariantGrid"
 import { api, errorMessage } from "../../lib/api"
 import { endOfDay } from "../../lib/days"
 import { formatMoney, formatPercent, parseAmount, toInputAmount } from "../../lib/format"
@@ -27,6 +28,7 @@ import { findByCode } from "../../lib/scanner"
 import { useFeatures } from "../../lib/session"
 import { ContactPicker } from "../contacts/ContactPicker"
 import { convertMinor, makeContext, methodUsable, paymentRate } from "../pos/compute"
+import { VariantQtyDialog } from "./VariantQtyDialog"
 
 interface Line {
   item: CatalogItem
@@ -58,6 +60,8 @@ export function NewPurchaseDialog({
   const [includesTax, setIncludesTax] = useState(false)
   const [lines, setLines] = useState<Line[]>([])
   const [search, setSearch] = useState("")
+  // Producto con tallas y colores: sus cantidades se escriben en cuadrícula.
+  const [grid, setGrid] = useState<CatalogItem[] | null>(null)
   const [methodId, setMethodId] = useState("")
   const [reference, setReference] = useState("")
   // Lo que se le debe al proveedor en vez de pagarlo ya, y hasta cuándo hay para pagar.
@@ -114,23 +118,42 @@ export function NewPurchaseDialog({
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     if (q.length < 2) return []
-    return (products.data ?? [])
-      .filter(
-        (p) =>
-          p.tracksStock &&
-          (p.name.toLowerCase().includes(q) || p.barcode === q || p.sku.toLowerCase() === q),
-      )
+    const all = (products.data ?? []).filter((p) => p.tracksStock)
+    // De un producto con tallas y colores sale una sola opción, con todas sus combinaciones.
+    return groupByProduct(
+      all.filter(
+        (p) => p.name.toLowerCase().includes(q) || p.barcode === q || p.sku.toLowerCase() === q,
+      ),
+    )
+      .map((g) => (g[0]?.options ? all.filter((p) => p.productId === g[0]?.productId) : g))
       .slice(0, 8)
   }, [products.data, search])
 
+  const lastCost = (item: CatalogItem) =>
+    item.costMinor !== null && item.costCurrency === currency ? toInputAmount(item.costMinor) : ""
   const addLine = (item: CatalogItem) => {
-    const lastCost =
-      item.costMinor !== null && item.costCurrency === currency ? toInputAmount(item.costMinor) : ""
     setLines((ls) =>
       ls.some((l) => l.item.variantId === item.variantId)
         ? ls
-        : [...ls, { item, qty: "1", cost: lastCost, expiresOn: "", lotCode: "" }],
+        : [...ls, { item, qty: "1", cost: lastCost(item), expiresOn: "", lotCode: "" }],
     )
+    setSearch("")
+  }
+  // Las de la cuadrícula: si ya estaban, se cambia su cantidad y su costo.
+  const addLines = (added: { item: CatalogItem; qty: string; cost: string }[]) => {
+    setLines((ls) => {
+      const next = ls.map((l) => {
+        const same = added.find((a) => a.item.variantId === l.item.variantId)
+        return same ? { ...l, qty: same.qty, cost: same.cost } : l
+      })
+      for (const a of added) {
+        if (!ls.some((l) => l.item.variantId === a.item.variantId)) {
+          next.push({ item: a.item, qty: a.qty, cost: a.cost, expiresOn: "", lotCode: "" })
+        }
+      }
+      return next
+    })
+    setGrid(null)
     setSearch("")
   }
 
@@ -278,17 +301,26 @@ export function NewPurchaseDialog({
           </div>
           {filtered.length ? (
             <ul className="absolute top-11 z-10 w-full divide-y rounded-md border bg-popover shadow-lg">
-              {filtered.map((p) => (
-                <li key={p.variantId}>
-                  <button
-                    type="button"
-                    className="w-full cursor-pointer px-3 py-2 text-left text-sm hover:bg-accent"
-                    onClick={() => addLine(p)}
-                  >
-                    {p.name} <span className="text-muted-foreground">{p.sku}</span>
-                  </button>
-                </li>
-              ))}
+              {filtered.map((g) => {
+                const p = g[0]
+                if (!p) return null
+                return (
+                  <li key={p.options ? p.productId : p.variantId}>
+                    <button
+                      type="button"
+                      className="w-full cursor-pointer px-3 py-2 text-left text-sm hover:bg-accent"
+                      onClick={() => (p.options ? setGrid(g) : addLine(p))}
+                    >
+                      {p.options ? p.productName : p.name}{" "}
+                      <span className="text-muted-foreground">
+                        {p.options
+                          ? `${g.length} combinaciones (${p.options.map((o) => o.name.toLocaleLowerCase("es")).join(", ")})`
+                          : p.sku}
+                      </span>
+                    </button>
+                  </li>
+                )
+              })}
             </ul>
           ) : null}
         </div>
@@ -541,6 +573,15 @@ export function NewPurchaseDialog({
             {busy ? "Registrando…" : onCredit ? "Registrar compra a deber" : "Registrar compra"}
           </Button>
         </DialogFooter>
+        {grid ? (
+          <VariantQtyDialog
+            items={grid}
+            initialCost={grid[0] ? lastCost(grid[0]) : ""}
+            costLabel={`Costo unit. ${includesTax ? "(con IVA)" : "(sin IVA)"}`}
+            onAdd={addLines}
+            onClose={() => setGrid(null)}
+          />
+        ) : null}
       </DialogContent>
     </Dialog>
   )

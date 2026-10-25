@@ -27,7 +27,7 @@ import {
   TabsTrigger,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
-import { BanIcon, PrinterIcon, Undo2Icon } from "lucide-react"
+import { BanIcon, PrinterIcon, TagIcon, Undo2Icon } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 import { api, errorMessage } from "../../lib/api"
@@ -36,6 +36,7 @@ import { formatDay, formatMoney, formatTime } from "../../lib/format"
 import { usePrintDocument } from "../../lib/printing"
 import { bootstrapQuery, documentQuery, documentsQuery, queryClient } from "../../lib/queries"
 import { can, useMe } from "../../lib/session"
+import { LabelsDialog } from "../labels/LabelsDialog"
 import { ShiftsList } from "../shifts/ShiftsList"
 import { Receipt, ReceiptDialog } from "./ReceiptDialog"
 import { ReturnDialog } from "./ReturnDialog"
@@ -55,6 +56,7 @@ const DOC_LABEL: Record<string, string> = {
   DEBT_OUT: "Deuda con proveedor",
   STOCK_TRANSFER: "Traslado",
   PURCHASE_RETURN: "Devolución a proveedor",
+  PRODUCTION: "Producción",
 }
 
 const VOID_PERMISSION: Record<string, string> = {
@@ -72,7 +74,19 @@ const VOID_PERMISSION: Record<string, string> = {
   DEBT_OUT: "payable.manage",
   STOCK_TRANSFER: "inventory.adjust",
   PURCHASE_RETURN: "purchase.void",
+  PRODUCTION: "inventory.adjust",
 }
+
+/** Los documentos de nombre masculino (el gasto, el ajuste…): «anulado» en vez de «anulada». */
+const MASCULINE = new Set([
+  "PAYMENT_IN",
+  "EXPENSE",
+  "PAYMENT_OUT",
+  "CASH_IN",
+  "CASH_OUT",
+  "ADJUSTMENT",
+  "STOCK_TRANSFER",
+])
 
 /** Detalle imprimible de un documento, con anulación si se tiene el permiso. */
 export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose: () => void }) {
@@ -82,6 +96,7 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
   const { print, printing } = usePrintDocument()
   const [confirming, setConfirming] = useState(false)
   const [returning, setReturning] = useState(false)
+  const [labeling, setLabeling] = useState(false)
   const [receiptId, setReceiptId] = useState<string | null>(null)
   const [reason, setReason] = useState("")
   const [busy, setBusy] = useState(false)
@@ -116,8 +131,9 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
         queryClient.invalidateQueries({ queryKey: ["stock-reasons"] }),
         queryClient.invalidateQueries({ queryKey: ["transfers"] }),
         queryClient.invalidateQueries({ queryKey: ["lots"] }),
+        queryClient.invalidateQueries({ queryKey: ["production"] }),
       ])
-      toast.success(`${label} ${doc.number} ${doc.type === "EXPENSE" ? "anulado" : "anulada"}`)
+      toast.success(`${label} ${doc.number} ${MASCULINE.has(doc.type) ? "anulado" : "anulada"}`)
       onClose()
     } catch (e) {
       toast.error(errorMessage(e))
@@ -183,6 +199,11 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
               <BanIcon /> Anular
             </Button>
           ) : null}
+          {doc.type === "PURCHASE" && !doc.reversesDocumentId && detail.data ? (
+            <Button variant="outline" onClick={() => setLabeling(true)}>
+              <TagIcon /> Etiquetas
+            </Button>
+          ) : null}
           <Button
             variant="outline"
             onClick={() => print(doc.id)}
@@ -193,6 +214,16 @@ export function DocumentDialog({ doc, onClose }: { doc: DocumentSummary; onClose
           <Button onClick={onClose}>Cerrar</Button>
         </DialogFooter>
       </DialogContent>
+      {labeling && detail.data ? (
+        // Una etiqueta por cada unidad que llegó en la compra.
+        <LabelsDialog
+          initial={detail.data.lines.map((l) => ({
+            variantId: l.variantId,
+            qty: Math.max(1, Math.ceil(l.qtyMilli / 1000)),
+          }))}
+          onClose={() => setLabeling(false)}
+        />
+      ) : null}
       {returning ? (
         <ReturnDialog
           documentId={doc.id}

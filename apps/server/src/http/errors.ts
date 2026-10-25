@@ -47,6 +47,7 @@ const POSTING_STATUS: Record<PostingErrorCode, ContentfulStatusCode> = {
   HAS_RETURNS: 409,
   QUOTE_CLOSED: 409,
   DISCOUNT_DENIED: 409,
+  TAB_CHANGED: 409,
 }
 
 export function postingStatus(code: PostingErrorCode): ContentfulStatusCode {

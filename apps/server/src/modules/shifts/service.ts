@@ -431,6 +431,25 @@ export function shiftReport(db: Db, shiftId: string): ShiftReport {
     }
   }
 
+  // Propinas por quien las recibe ("" = el equipo); los reversos del turno las restan.
+  const tipTotals = new Map<string, number>()
+  for (const d of sales) {
+    if (d.tipLegalMinor === 0) continue
+    const key = d.tipUserId ?? ""
+    tipTotals.set(key, (tipTotals.get(key) ?? 0) + d.tipLegalMinor)
+  }
+  const tipUserIds = [...tipTotals.keys()].filter(Boolean)
+  const tipNames = new Map(
+    tipUserIds.length
+      ? db
+          .select({ id: user.id, name: user.name })
+          .from(user)
+          .where(inArray(user.id, tipUserIds))
+          .all()
+          .map((u) => [u.id, u.name])
+      : [],
+  )
+
   const adjustments = new Set(
     shift.accounts.length
       ? db
@@ -482,6 +501,14 @@ export function shiftReport(db: Db, shiftId: string): ShiftReport {
       count: supplierReturns.reduce((acc, d) => acc + (d.reversesDocumentId ? -1 : 1), 0),
       totalLegalMinor: supplierReturns.reduce((acc, d) => acc + d.totalLegalMinor, 0),
     },
+    tips: [...tipTotals]
+      .filter(([, total]) => total !== 0)
+      .map(([id, total]) => ({
+        userId: id || null,
+        name: id ? (tipNames.get(id) ?? id) : "Todo el equipo",
+        totalLegalMinor: total,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, "es")),
     byMethod: [...byMethod.values()]
       .filter((m) => m.amountMinor !== 0)
       .sort((a, b) => a.methodName.localeCompare(b.methodName, "es")),

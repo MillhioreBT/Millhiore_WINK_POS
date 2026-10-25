@@ -6,6 +6,10 @@ export const PERMISSIONS = [
   "sale.discount",
   "sale.void",
   "sale.credit",
+  /** Abrir cuentas en las mesas, pedir y moverlas (cobrarlas es vender). */
+  "table.serve",
+  /** Ver la pantalla de cocina y marcar lo que está listo. */
+  "kitchen.view",
   "payment.receive",
   "purchase.create",
   "purchase.void",
@@ -37,7 +41,7 @@ export interface RoleTemplate {
   permissions: readonly Permission[]
 }
 
-/** Los cuatro roles que trae cada instalación. Se pueden editar y crear más. */
+/** Los roles que trae cada instalación. Se pueden editar y crear más. */
 export const DEFAULT_ROLES: readonly RoleTemplate[] = [
   { id: "owner", name: "Dueño", permissions: PERMISSIONS },
   {
@@ -51,11 +55,16 @@ export const DEFAULT_ROLES: readonly RoleTemplate[] = [
     permissions: [
       "sale.create",
       "sale.credit",
+      "table.serve",
       "payment.receive",
       "inventory.view",
       "shift.manage",
     ],
   },
+  // Toma los pedidos de las mesas; cobra el cajero.
+  { id: "waiter", name: "Mesonero", permissions: ["table.serve"] },
+  // Ve las comandas en la pantalla de cocina y marca lo que está listo.
+  { id: "kitchen", name: "Cocina", permissions: ["kitchen.view"] },
   {
     id: "warehouse",
     name: "Almacenista",
@@ -78,6 +87,7 @@ const POST_PERMISSION: Partial<Record<DocumentType, Permission>> = {
   DEBT_OUT: "payable.manage",
   STOCK_TRANSFER: "inventory.adjust",
   PURCHASE_RETURN: "purchase.void",
+  PRODUCTION: "inventory.adjust",
 }
 
 const VOID_PERMISSION: Partial<Record<DocumentType, Permission>> = {
@@ -95,6 +105,7 @@ const VOID_PERMISSION: Partial<Record<DocumentType, Permission>> = {
   DEBT_OUT: "payable.manage",
   STOCK_TRANSFER: "inventory.adjust",
   PURCHASE_RETURN: "purchase.void",
+  PRODUCTION: "inventory.adjust",
 }
 
 /** Permiso que exige contabilizar un documento de este tipo. */

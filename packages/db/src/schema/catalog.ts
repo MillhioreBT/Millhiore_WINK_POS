@@ -1,4 +1,4 @@
-import { TAX_KINDS } from "@millhiore/domain"
+import { type ProductOption, TAX_KINDS } from "@millhiore/domain"
 import { sql } from "drizzle-orm"
 import { check, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core"
 import { currency } from "./core"
@@ -54,6 +54,11 @@ export const product = sqliteTable(
     taxId: text("tax_id").references(() => tax.id),
     /** Categoría del producto; null = sin categoría. */
     categoryId: text("category_id").references(() => category.id),
+    /**
+     * Tallas, colores u otras características (hasta tres) con sus valores en orden; null = se
+     * vende de una sola forma. Cada combinación es una variante con su código y su existencia.
+     */
+    options: text("options", { mode: "json" }).$type<ProductOption[]>(),
     active: integer("active", { mode: "boolean" }).notNull().default(true),
     createdAt: integer("created_at").notNull(),
   },
@@ -83,7 +88,10 @@ export const variant = sqliteTable(
       .references(() => product.id),
     sku: text("sku").notNull().unique(),
     barcode: text("barcode").unique(),
+    /** El del producto con los valores de la combinación: «Camisa (M, Azul)». */
     name: text("name").notNull(),
+    /** Un valor por cada característica del producto, en su orden; null si no tiene. */
+    optionValues: text("option_values", { mode: "json" }).$type<string[]>(),
     priceMinor: integer("price_minor").notNull(),
     priceCurrency: text("price_currency")
       .notNull()
@@ -204,5 +212,101 @@ export const discountCode = sqliteTable(
       sql`(${t.kind} = 'percent' and ${t.rateBp} between 1 and 10000)
         or (${t.kind} = 'amount' and ${t.amountMinor} > 0 and ${t.currency} is not null)`,
     ),
+  ],
+)
+
+/**
+ * Opciones y extras que se eligen al vender un producto: «Término» (una sola, obligatoria),
+ * «Extras» (varios, con su precio). Un grupo sirve para varios productos.
+ */
+export const modifierGroup = sqliteTable(
+  "modifier_group",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    /** Cuántas hay que elegir como mínimo (1 = obligatoria). */
+    minSelect: integer("min_select").notNull().default(0),
+    /** Cuántas se pueden elegir como máximo; null = todas. */
+    maxSelect: integer("max_select"),
+    position: integer("position").notNull().default(0),
+    active: integer("active", { mode: "boolean" }).notNull().default(true),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    check(
+      "modifier_group_select",
+      sql`${t.minSelect} >= 0 and (${t.maxSelect} is null or ${t.maxSelect} >= max(${t.minSelect}, 1))`,
+    ),
+  ],
+)
+
+export const modifier = sqliteTable(
+  "modifier",
+  {
+    id: text("id").primaryKey(),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => modifierGroup.id),
+    name: text("name").notNull(),
+    /** Lo que suma al precio del producto, en `priceCurrency`; 0 = no cambia el precio. */
+    priceMinor: integer("price_minor").notNull().default(0),
+    priceCurrency: text("price_currency").references(() => currency.code),
+    position: integer("position").notNull().default(0),
+    active: integer("active", { mode: "boolean" }).notNull().default(true),
+  },
+  (t) => [
+    check(
+      "modifier_price",
+      sql`${t.priceMinor} >= 0 and (${t.priceMinor} = 0 or ${t.priceCurrency} is not null)`,
+    ),
+  ],
+)
+
+/** Qué grupos de opciones se ofrecen con cada producto, en su orden. */
+export const productModifierGroup = sqliteTable(
+  "product_modifier_group",
+  {
+    productId: text("product_id")
+      .notNull()
+      .references(() => product.id),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => modifierGroup.id),
+    position: integer("position").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.productId, t.groupId] })],
+)
+
+/** Una opción elegida, congelada en la línea con el nombre y el precio que tenía. */
+export interface PickedModifier {
+  id: string
+  name: string
+  priceMinor: number
+  priceCurrency: string | null
+}
+
+/**
+ * Receta de un producto: cuánto de cada ingrediente (un producto con existencia) lleva una
+ * unidad, más la merma. Si el producto no lleva existencia (un plato), sus ingredientes se
+ * descuentan al venderlo; si la lleva, la receta sirve para producirlo por tandas.
+ */
+export const recipeItem = sqliteTable(
+  "recipe_item",
+  {
+    productId: text("product_id")
+      .notNull()
+      .references(() => product.id),
+    ingredientId: text("ingredient_id")
+      .notNull()
+      .references(() => variant.id),
+    /** Por cada unidad del producto, en milésimas del ingrediente (150 = 0,150 kg). */
+    qtyMilli: integer("qty_milli").notNull(),
+    /** Merma en centésimas de punto: 1000 = se pierde un 10 % más al prepararlo. */
+    wasteBp: integer("waste_bp").notNull().default(0),
+    position: integer("position").notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.productId, t.ingredientId] }),
+    check("recipe_item_qty", sql`${t.qtyMilli} > 0 and ${t.wasteBp} between 0 and 10000`),
   ],
 )

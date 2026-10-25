@@ -8,15 +8,24 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  Input,
+  NativeSelect,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
-import { BookOpenIcon } from "lucide-react"
+import { BookOpenIcon, MinusIcon, PlusIcon } from "lucide-react"
 import { useMemo, useState } from "react"
 import { toast } from "sonner"
 import { api, errorMessage } from "../../lib/api"
-import { formatDay, formatMoney, formatPercent } from "../../lib/format"
-import { queryClient, statementQuery } from "../../lib/queries"
-import { can, useMe } from "../../lib/session"
+import {
+  currencySymbol,
+  formatDay,
+  formatMoney,
+  formatPercent,
+  parseAmount,
+  toInputAmount,
+} from "../../lib/format"
+import { bootstrapQuery, queryClient, statementQuery } from "../../lib/queries"
+import { can, useFeatures, useMe } from "../../lib/session"
 import { ContactPicker } from "../contacts/ContactPicker"
 import {
   type CartLine,
@@ -33,11 +42,13 @@ import { PaymentPanel, useChange } from "./PaymentPanel"
 import { usePos } from "./store"
 
 const DAY_MS = 86_400_000
+/** Propinas sugeridas, en % del total de la venta. */
+const TIP_PERCENTS = [5, 10, 15]
 
 export function CheckoutDialog({
   ctx,
   lines,
-  ticket,
+  ticket: sale,
   saleId,
   terminalId,
   onClose,
@@ -52,9 +63,14 @@ export function CheckoutDialog({
   onPosted: (documentId: string) => void
 }) {
   const me = useMe()
+  const features = useFeatures()
+  const staff = useQuery(bootstrapQuery).data?.staff ?? []
   const [payments, setPayments] = useState<PaymentEntry[]>([])
   const [busy, setBusy] = useState(false)
   const quote = usePos((s) => s.quote)
+  const tab = usePos((s) => s.tab)
+  // Una mesa que paga a partes iguales: cuánto le toca a cada quien.
+  const [parts, setParts] = useState(1)
   const discountCode = usePos((s) => s.saleDiscount?.code)
   // Una venta que sale de una cotización viene con su cliente.
   const [customer, setCustomer] = useState<Contact | null>(quote?.contact ?? null)
@@ -69,6 +85,24 @@ export function CheckoutDialog({
 
   const doc = ctx.docCurrency
   const ref = ctx.refCurrency
+
+  // Propina: aparte del total (sin IVA ni IGTF), escrita en Bs o en divisas; va para quien atiende
+  // la mesa o para quien se elija (vacío: para todo el equipo).
+  const [tipText, setTipText] = useState("")
+  const [tipCurrency, setTipCurrency] = useState(doc)
+  const [tipUserId, setTipUserId] = useState(tab?.waiterId ?? "")
+  const tipTyped = features.tips && tipText.trim() ? parseAmount(tipText, 2) : 0
+  const tipMinor =
+    tipTyped === null
+      ? null
+      : tipCurrency === doc
+        ? tipTyped
+        : convertMinor(ctx, tipTyped, tipCurrency, doc)
+  const ticket = useMemo(() => (tipMinor ? { ...sale, tipMinor } : sale), [sale, tipMinor])
+  const tipPercent = (pct: number) => {
+    setTipCurrency(doc)
+    setTipText(toInputAmount(Math.round((sale.totalMinor * pct) / 100)))
+  }
 
   // Fiar: solo con un cliente registrado, si el negocio lo permite y la persona tiene permiso.
   // La deuda va en la moneda de referencia (dólares): en bolívares se devalúa.
@@ -132,6 +166,10 @@ export function CheckoutDialog({
       toast.error("Elige el cliente al que le fías")
       return
     }
+    if (tipMinor === null) {
+      toast.error("Escribe bien la propina")
+      return
+    }
     setBusy(true)
     try {
       const posted = await api<PostedDocumentBody>("/api/documents", {
@@ -144,13 +182,17 @@ export function CheckoutDialog({
           pricesIncludeTax: ctx.fiscal.pricesIncludeTax,
           contactId: customer?.id ?? null,
           ...(quote ? { quoteId: quote.id } : {}),
+          ...(tab ? { tab: { id: tab.id, lines: tab.lines } } : {}),
           ...(discountCode ? { discountCodeId: discountCode.id } : {}),
           ...(credit ? { creditMinor: credit.amountMinor, creditCurrency: credit.currency } : {}),
+          ...(tipMinor ? { tipMinor, tipUserId: tipUserId || null } : {}),
           lines: lines.map((l) => ({
             variantId: l.variantId,
             qtyMilli: l.qtyMilli,
             unitPriceMinor: l.unitPriceMinor,
             discountMinor: l.discountMinor ?? 0,
+            ...(l.modifiers?.length ? { modifierIds: l.modifiers.map((m) => m.id) } : {}),
+            ...(l.note ? { note: l.note } : {}),
           })),
           // Recargos (delivery, servicio): el fijo con el monto que se ve; el % lo calcula el servidor.
           charges: ticket.charges.map((c) => ({
@@ -172,6 +214,12 @@ export function CheckoutDialog({
         queryClient.invalidateQueries({ queryKey: ["documents"] }),
         queryClient.invalidateQueries({ queryKey: ["receivables"] }),
         ...(quote ? [queryClient.invalidateQueries({ queryKey: ["quotes"] })] : []),
+        ...(tab
+          ? [
+              queryClient.invalidateQueries({ queryKey: ["dining"] }),
+              queryClient.invalidateQueries({ queryKey: ["tabs"] }),
+            ]
+          : []),
       ])
       toast.success(`Venta ${posted.number} registrada${credit ? " a crédito" : ""}`)
       onPosted(posted.id)
@@ -197,6 +245,15 @@ export function CheckoutDialog({
             <span>Total de la venta</span>
             <span className="tabular">{formatMoney(ticket.totalMinor, doc)}</span>
           </div>
+          {tipMinor ? (
+            <div className="flex justify-between text-muted-foreground">
+              <span>
+                Propina
+                {tipUserId ? ` para ${staff.find((u) => u.id === tipUserId)?.name ?? ""}` : ""}
+              </span>
+              <span className="tabular">{formatMoney(tipMinor, doc)}</span>
+            </div>
+          ) : null}
           {checkout.surcharges.map((s) => (
             <div key={s.surchargeId} className="flex justify-between text-muted-foreground">
               <span>
@@ -220,6 +277,107 @@ export function CheckoutDialog({
             </span>
           </div>
         </div>
+
+        {tab ? (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+            <span className="text-muted-foreground">Partes iguales</span>
+            <span className="flex items-center gap-1">
+              <Button
+                variant="outline"
+                size="icon-sm"
+                aria-label="Una parte menos"
+                disabled={parts <= 1}
+                onClick={() => setParts((n) => n - 1)}
+              >
+                <MinusIcon />
+              </Button>
+              <span className="tabular w-8 text-center">{parts}</span>
+              <Button
+                variant="outline"
+                size="icon-sm"
+                aria-label="Una parte más"
+                disabled={parts >= 30}
+                onClick={() => setParts((n) => n + 1)}
+              >
+                <PlusIcon />
+              </Button>
+            </span>
+            {parts > 1 ? (
+              <span className="tabular">
+                Cada una: {formatMoney(Math.ceil(ticket.totalMinor / parts), doc)}
+                {ctx.rate
+                  ? ` ≈ ${formatMoney(toRef(Math.ceil(ticket.totalMinor / parts)) ?? 0, ref)}`
+                  : ""}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
+        {features.tips ? (
+          <div className="grid grid-cols-1 gap-2 rounded-lg border p-3 text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">Propina</span>
+              {TIP_PERCENTS.map((pct) => (
+                <Button
+                  key={pct}
+                  variant="outline"
+                  size="sm"
+                  disabled={payments.length > 0}
+                  onClick={() => tipPercent(pct)}
+                >
+                  {pct} %
+                </Button>
+              ))}
+              <span className="flex items-center gap-1">
+                <Input
+                  value={tipText}
+                  inputMode="decimal"
+                  className="tabular h-9 w-24 text-right sm:h-8"
+                  aria-label="Propina"
+                  placeholder="0,00"
+                  disabled={payments.length > 0}
+                  onChange={(e) => setTipText(e.target.value)}
+                />
+                {ctx.rate ? (
+                  <NativeSelect
+                    className="h-9 w-20 sm:h-8"
+                    aria-label="Moneda de la propina"
+                    value={tipCurrency}
+                    disabled={payments.length > 0}
+                    onChange={(e) => setTipCurrency(e.target.value)}
+                  >
+                    {[doc, ref].map((c) => (
+                      <option key={c} value={c}>
+                        {currencySymbol(c)}
+                      </option>
+                    ))}
+                  </NativeSelect>
+                ) : (
+                  <span className="text-muted-foreground">{currencySymbol(doc)}</span>
+                )}
+              </span>
+            </div>
+            {tipMinor ? (
+              <NativeSelect
+                aria-label="Para quién es la propina"
+                value={tipUserId}
+                onChange={(e) => setTipUserId(e.target.value)}
+              >
+                <option value="">Para todo el equipo</option>
+                {staff.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    Para {u.name}
+                  </option>
+                ))}
+              </NativeSelect>
+            ) : null}
+            {tipMinor === null ? (
+              <p className="text-destructive">Escribe la propina como 2 o 2,50.</p>
+            ) : payments.length > 0 ? (
+              <p className="text-muted-foreground">Para cambiar la propina, quita los pagos.</p>
+            ) : null}
+          </div>
+        ) : null}
 
         <ContactPicker
           kind="customer"

@@ -9,6 +9,7 @@ import {
   salesReportSchema,
   taxBookQuerySchema,
   taxBookSchema,
+  tipsReportSchema,
 } from "@millhiore/contracts"
 import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
@@ -16,6 +17,7 @@ import { HttpError } from "../../http/errors"
 import { inventoryReport, resultsReport, salesReport } from "./period"
 import { daySummary } from "./service"
 import { taxBook } from "./taxBook"
+import { tipsReport } from "./tips"
 
 const err = { content: { "application/json": { schema: apiErrorSchema } } }
 
@@ -66,6 +68,20 @@ const salesRoute = createRoute({
   request: { query: reportRangeQuerySchema },
   responses: {
     200: { description: "Ventas", content: { "application/json": { schema: salesReportSchema } } },
+    ...rangeResponses,
+  },
+})
+
+const tipsRoute = createRoute({
+  method: "get",
+  path: "/api/reports/tips",
+  tags: ["Informes"],
+  summary: "Propinas de un período por mesonero",
+  description:
+    "Lo que dejaron los clientes de propina, por quien la recibe (o para todo el equipo), neto de anulaciones, en moneda legal y en la de referencia a la tasa de cada venta.",
+  request: { query: reportRangeQuerySchema },
+  responses: {
+    200: { description: "Propinas", content: { "application/json": { schema: tipsReportSchema } } },
     ...rangeResponses,
   },
 })
@@ -128,6 +144,13 @@ export function registerReportRoutes(app: App, deps: AppDeps): void {
       salesReport(deps.db, { from, to, seeCost: actor.permissions.has("cost.view") }),
       200,
     )
+  })
+
+  app.openapi(tipsRoute, (c) => {
+    requirePermission(c, "report.view")
+    const { from, to } = c.req.valid("query")
+    checkRange(from, to)
+    return c.json(tipsReport(deps.db, { from, to }), 200)
   })
 
   app.openapi(taxBookRoute, (c) => {

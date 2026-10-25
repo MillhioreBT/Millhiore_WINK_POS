@@ -60,7 +60,9 @@ import {
 import { can, useFeatures, useMe } from "../../lib/session"
 import { SessionsPanel } from "../account/SessionsPanel"
 import { EditUserDialog, ResetPasswordDialog } from "../account/UserDialogs"
+import { KitchenCard } from "../kitchen/KitchenCard"
 import { BusinessHeader } from "../sales/ReceiptDialog"
+import { DiningCard } from "../tables/LayoutDialog"
 import { AuditTab } from "./AuditTab"
 import { ChargesCard } from "./ChargesCard"
 import { FeaturesCard } from "./FeaturesCard"
@@ -618,6 +620,8 @@ function BusinessTab() {
       <BusinessForm key={JSON.stringify(profile.data)} profile={profile.data} />
       <FeaturesCard />
       {features.locations ? <LocationsCard /> : null}
+      {features.tables ? <DiningCard /> : null}
+      {features.kitchen ? <KitchenCard /> : null}
       <SecurityCard />
     </div>
   )

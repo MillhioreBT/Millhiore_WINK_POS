@@ -94,6 +94,20 @@ export function ShiftReportView({
           ) : null}
         </div>
       ))}
+      {report.tips.length ? (
+        <>
+          <Hr />
+          <p className="font-bold">PROPINAS</p>
+          {report.tips.map((t) => (
+            <Row
+              key={t.userId ?? "equipo"}
+              label={t.name}
+              value={formatMoney(t.totalLegalMinor, legal)}
+            />
+          ))}
+          <p>Ya están en lo cobrado: se entregan con un retiro de caja.</p>
+        </>
+      ) : null}
       {report.cashMovements.length ? (
         <>
           <Hr />

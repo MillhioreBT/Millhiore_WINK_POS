@@ -6,8 +6,10 @@ import {
   BookOpenIcon,
   BoxesIcon,
   CalendarClockIcon,
+  ChefHatIcon,
   ChevronDownIcon,
   ClipboardCheckIcon,
+  CookingPotIcon,
   FileTextIcon,
   LandmarkIcon,
   LayoutDashboardIcon,
@@ -17,6 +19,7 @@ import {
   ScrollTextIcon,
   SettingsIcon,
   ShoppingCartIcon,
+  SquareMenuIcon,
   TruckIcon,
   UsersIcon,
   WalletIcon,
@@ -47,6 +50,12 @@ export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
     show("report.view") ? { to: "/inicio", label: "Inicio", icon: LayoutDashboardIcon } : null,
     group("Ventas", ShoppingCartIcon, [
       show("sale.create") ? { to: "/caja", label: "Vender", icon: ShoppingCartIcon } : null,
+      features.tables && show("table.serve")
+        ? { to: "/mesas", label: "Mesas", icon: SquareMenuIcon }
+        : null,
+      features.kitchen && show("kitchen.view")
+        ? { to: "/cocina", label: "Cocina", icon: ChefHatIcon }
+        : null,
       show("sale.create", "report.view")
         ? { to: "/ventas", label: "Historial", icon: ReceiptTextIcon }
         : null,
@@ -60,7 +69,7 @@ export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
     show("catalog.manage", "inventory.view")
       ? { to: "/productos", label: "Productos", icon: PackageIcon }
       : null,
-    // Con varias ubicaciones, Inventario agrupa los ajustes y los traslados.
+    // Inventario agrupa los ajustes con el conteo, los traslados, los vencimientos y la producción.
     inventoryGroup([
       show("inventory.view", "inventory.adjust")
         ? { to: "/inventario", label: "Ajustes", icon: BoxesIcon }
@@ -73,6 +82,9 @@ export function useNav(): { main: NavEntry[]; settings: NavLink | null } {
         : null,
       features.lots && show("inventory.view", "inventory.adjust")
         ? { to: "/vencimientos", label: "Vencimientos", icon: CalendarClockIcon }
+        : null,
+      features.recipes && show("inventory.view", "inventory.adjust")
+        ? { to: "/produccion", label: "Producción", icon: CookingPotIcon }
         : null,
     ]),
     show("purchase.create") ? { to: "/compras", label: "Compras", icon: TruckIcon } : null,

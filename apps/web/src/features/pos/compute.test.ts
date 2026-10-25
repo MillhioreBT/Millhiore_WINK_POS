@@ -10,10 +10,12 @@ import {
   computeTicket,
   creditToLeave,
   creditUsable,
+  lineKey,
   makeContext,
   type PaymentEntry,
   type StoredLine,
   unitPriceInDoc,
+  unitWithModifiers,
 } from "./compute"
 
 const bootstrap = (taxpayer: "ordinary" | "special" | "none" = "special"): Bootstrap => ({
@@ -38,7 +40,15 @@ const bootstrap = (taxpayer: "ordinary" | "special" | "none" = "special"): Boots
     payables: true,
     locations: false,
     lots: false,
+    variants: false,
+    tables: false,
+    modifiers: false,
+    kitchen: false,
+    recipes: false,
+    tips: false,
   },
+  staff: [],
+  modifierGroups: [],
   charges: [
     {
       id: "delivery",
@@ -171,6 +181,17 @@ describe("caja", () => {
     const base = c.surcharges[0]?.baseMinor ?? 0
     expect(base).toBeGreaterThan(0)
     expect(base).toBeLessThanOrEqual(t.totalMinor - rest + 1)
+  })
+
+  test("la propina se cobra aparte: suma a lo que se cobra pero no paga IGTF", () => {
+    const t = { ...computeTicket(ctx, [agua]), tipMinor: 10_000 }
+    expect(amountToSettle(ctx, t, [], method("ves"))).toBe(101837 + 10_000)
+    const usd = amountToSettle(ctx, t, [], method("usd"))
+    const c = computeCheckout(ctx, t, [pay("usd", "USD", usd)])
+    expect(c.settled).toBe(true)
+    // El IGTF sigue siendo el 3 % de la venta, no de la propina.
+    expect(c.surchargeMinor).toBe(3055)
+    expect(c.dueMinor).toBe(101837 + 3055 + 10_000)
   })
 
   test("pagar de más en dólares da vuelto en Bs que cuadra", () => {
@@ -382,5 +403,44 @@ describe("recargos en la caja", () => {
   test("sin productos no hay recargos, y un recargo desconocido se ignora", () => {
     expect(buildCart(ctx, [], null, null, [{ chargeId: "delivery" }]).ticket.totalMinor).toBe(0)
     expect(buildCart(ctx, [line()], null, null, [{ chargeId: "nope" }]).ticket.charges).toEqual([])
+  })
+})
+
+describe("opciones y extras", () => {
+  const burger: StoredLine = {
+    key: "k1",
+    variantId: "b",
+    name: "Hamburguesa",
+    qtyMilli: 2000,
+    priceMinor: 500,
+    priceCurrency: "USD",
+    taxId: null,
+    modifiers: [
+      { id: "t", name: "Bien cocida", priceMinor: 0, priceCurrency: null },
+      { id: "q", name: "Queso", priceMinor: 100, priceCurrency: "USD" },
+      { id: "s", name: "Salsa de la casa", priceMinor: 3650, priceCurrency: "VES" },
+    ],
+    note: "sin cebolla",
+  }
+
+  test("cada extra suma su precio (en su moneda) al del producto", () => {
+    const unit = unitWithModifiers(ctx, 500, "USD", burger.modifiers)
+    expect(unit).toBe((unitPriceInDoc(ctx, 600, "USD") ?? 0) + 3650)
+    const cart = buildCart(ctx, [burger], null, null)
+    expect(cart.lines[0]).toMatchObject({
+      key: "k1",
+      unitPriceMinor: unit,
+      note: "sin cebolla",
+    })
+    expect(cart.lines[0]?.modifiers?.map((m) => m.id)).toEqual(["t", "q", "s"])
+    expect(cart.ticket.totalMinor).toBe((unit ?? 0) * 2)
+    // Sin tasa, el extra en dólares no se puede convertir.
+    const noRate = makeContext(bootstrap(), null)
+    expect(unitWithModifiers(noRate, 3650, "VES", burger.modifiers)).toBeNull()
+  })
+
+  test("cada línea con opciones tiene su clave; las demás, el producto", () => {
+    expect(lineKey(burger)).toBe("k1")
+    expect(lineKey({ variantId: "v" })).toBe("v")
   })
 })

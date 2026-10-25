@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import type { DocumentDetail } from "@millhiore/contracts"
+import type { DocumentDetail, KitchenTicket } from "@millhiore/contracts"
 import {
+  billLines,
   COLUMNS,
   columns,
   encodePc850,
+  kitchenLines,
   receiptLines,
   testPageLines,
   toEscPos,
@@ -21,6 +23,10 @@ const business = {
 }
 
 const sale: DocumentDetail = {
+  tipMinor: 0,
+  tipLegalMinor: 0,
+  tipUserId: null,
+  tipUserName: null,
   id: "d1",
   type: "SALE",
   number: "C1-000001",
@@ -71,7 +77,10 @@ const sale: DocumentDetail = {
       lineTotalMinor: 203674,
       taxId: "G",
       taxRateBp: 1600,
+      modifiers: [{ id: "m1", name: "Bien frío", priceMinor: 0, priceCurrency: null }],
+      note: null,
       lots: [],
+      ingredients: [],
     },
     {
       lineNo: 2,
@@ -83,7 +92,10 @@ const sale: DocumentDetail = {
       lineTotalMinor: 105348,
       taxId: "E",
       taxRateBp: 0,
+      modifiers: [],
+      note: null,
       lots: [],
+      ingredients: [],
     },
   ],
   payments: [
@@ -331,6 +343,51 @@ describe("recibo", () => {
     expect(back).toContain("ANULACIÓN")
   })
 
+  test("una producción dice lo producido y lo que se gastó, sin precios", () => {
+    const tanda: DocumentDetail = {
+      ...sale,
+      type: "PRODUCTION",
+      number: "C1-PR-000001",
+      totalMinor: 0,
+      surchargeMinor: 0,
+      contactName: null,
+      locationName: "Cocina",
+      lines: [
+        {
+          ...(sale.lines[0] as DocumentDetail["lines"][number]),
+          name: "Salsa de la casa (l)",
+          qtyMilli: 4000,
+          unitPriceMinor: 0,
+          lineTotalMinor: 0,
+          ingredients: [
+            { variantId: "tomate", name: "Tomate (kg)", qtyMilli: 2200 },
+            { variantId: "ajo", name: "Ajo (cabeza)", qtyMilli: 3000 },
+          ],
+        },
+      ],
+      payments: [],
+      taxes: [],
+      surcharges: [],
+    }
+    const text = toPlainText(receiptLines(tanda, business, 48), 48)
+    expect(text).toContain("PRODUCCIÓN")
+    expect(text).toContain("En: Cocina")
+    expect(text).toMatch(/Salsa de la casa \(l\)\s+4/)
+    expect(text).toContain("Se gastó:")
+    expect(text).toMatch(/Tomate \(kg\)\s+2,2/)
+    expect(text).not.toContain("Bs")
+    expect(text).not.toContain("¡Gracias por su compra!")
+  })
+
+  test("la propina sale aparte del total, con para quién es", () => {
+    const text = toPlainText(
+      receiptLines({ ...sale, tipMinor: 30000, tipUserName: "Juan" }, business, 48),
+      48,
+    )
+    expect(text).toMatch(/Propina \(Juan\)\s+Bs 300,00/)
+    expect(text).toMatch(/CON PROPINA\s+Bs 3\.452,93/)
+  })
+
   test("el mensaje del pie es el del negocio", () => {
     const text = toPlainText(
       receiptLines(sale, { ...business, receiptFooter: "Vuelva pronto" }, 32),
@@ -348,5 +405,91 @@ describe("recibo", () => {
     expect([...bytes.slice(-4)]).toEqual([0x1d, 0x56, 66, 3])
     const plain = toEscPos(lines)
     expect([...plain.slice(5, 7)]).not.toEqual([0x1b, 0x70])
+  })
+})
+
+describe("opciones y extras", () => {
+  test("van debajo del producto, sin precio aparte", () => {
+    const text = toPlainText(receiptLines(sale, business, 48), 48)
+    expect(text).toContain("Agua mineral 1,5 L\n  + Bien frío\n")
+  })
+})
+
+describe("precuenta", () => {
+  test("encabezado, productos con su detalle, totales y pie", () => {
+    const text = toPlainText(
+      billLines(
+        {
+          title: "PRECUENTA · NO FISCAL",
+          info: ["Mesa 4 · CTA-000012", "3 personas"],
+          items: [
+            { name: "Parrilla mixta para dos", detail: "1 × Bs 1.095,00", amount: "Bs 1.095,00" },
+            { name: "Refresco", detail: "3 × Bs 54,75", amount: "Bs 164,25" },
+          ],
+          rows: [
+            { label: "Servicio 10 %", amount: "Bs 125,93" },
+            { label: "TOTAL", amount: "Bs 1.385,18", bold: true },
+          ],
+          footer: ["Ref. $ 37,95", "No es una factura"],
+        },
+        business,
+        32,
+      ),
+      32,
+    )
+    expect(text).toContain("PRECUENTA · NO FISCAL")
+    expect(text).toContain("Mesa 4 · CTA-000012")
+    expect(text).toContain("Parrilla mixta para dos")
+    expect(text).toContain("3 × Bs 54,75           Bs 164,25")
+    expect(text).toMatch(/TOTAL\s+Bs 1\.385,18/)
+    expect(text.split("\n").every((l) => l.length <= 32)).toBe(true)
+    expect(text.trimEnd().endsWith("No es una factura")).toBe(true)
+  })
+})
+
+describe("comanda", () => {
+  const ticket: KitchenTicket = {
+    id: "k1",
+    number: 23,
+    stationId: "s1",
+    stationName: "Cocina",
+    kind: "order",
+    source: "Mesa 4",
+    tabId: "t1",
+    documentId: null,
+    status: "pending",
+    createdAt: Date.UTC(2026, 9, 15, 0, 15), // 8:15 p. m. en Caracas
+    createdBy: "Luis",
+    readyAt: null,
+    printedAt: null,
+    printError: null,
+    lines: [
+      {
+        id: "l1",
+        name: "Hamburguesa",
+        qtyMilli: 2000,
+        modifiers: [{ id: "m", name: "Queso", priceMinor: 100, priceCurrency: "USD" }],
+        note: "sin cebolla",
+      },
+    ],
+  }
+
+  test("para quién en grande, cantidades, opciones e indicaciones", () => {
+    const lines = kitchenLines(ticket, 32, "America/Caracas")
+    const text = toPlainText(lines, 32)
+    expect(text).toContain("MESA 4")
+    expect(text).toMatch(/#23 · 8:15 p\. ?m\.\s+Luis/)
+    expect(text).toContain("2 × Hamburguesa\n  + Queso\n  ** sin cebolla")
+    expect(lines.find((l) => l.text === "2 × Hamburguesa")).toMatchObject({
+      bold: true,
+      tall: true,
+    })
+    expect(text.split("\n").every((l) => l.length <= 32)).toBe(true)
+  })
+
+  test("una anulación lo dice arriba y abajo", () => {
+    const text = toPlainText(kitchenLines({ ...ticket, kind: "void" }, 32, "America/Caracas"), 32)
+    expect(text.trim().startsWith("*** ANULAR ***")).toBe(true)
+    expect(text.trim().endsWith("*** ANULAR ***")).toBe(true)
   })
 })

@@ -10,11 +10,13 @@ import {
   surcharge,
   tax,
   terminal,
+  user,
 } from "@millhiore/db"
 import { asc, eq, sql } from "drizzle-orm"
 import { actorOf } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
+import { activeModifierGroups } from "../catalog/modifiers"
 import { priceListsForPos } from "../catalog/priceLists"
 import { chargesForPos } from "../charges/routes"
 import { features } from "../features/routes"
@@ -107,6 +109,16 @@ export function bootstrap(db: Db): Bootstrap {
     fiscal: fiscalSettings(db),
     credit: { enabled: creditEnabled(db) },
     features: features(db),
+    // A quién puede ir una propina: solo hace falta si el negocio las usa.
+    staff: features(db).tips
+      ? db
+          .select({ id: user.id, name: user.name })
+          .from(user)
+          .where(eq(user.active, true))
+          .orderBy(asc(user.name))
+          .all()
+      : [],
+    modifierGroups: activeModifierGroups(db),
     priceLists: priceListsForPos(db),
     charges: chargesForPos(db),
     security: { autoLockMinutes: autoLockMinutes(db) },

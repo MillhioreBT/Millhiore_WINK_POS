@@ -1,5 +1,7 @@
 import {
   isUuidv7,
+  MAX_OPTIONS,
+  MAX_VARIANTS,
   POSTABLE_TYPES,
   RECURRENCE_FREQUENCIES,
   TAX_KINDS,
@@ -26,6 +28,15 @@ export const exchangeRateSchema = z.object({
 })
 export type ExchangeRateInput = z.infer<typeof exchangeRateSchema>
 
+/** Una opción o extra elegido, con el nombre y el precio que tenía al venderse. */
+export const pickedModifierSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  priceMinor: safeInt,
+  priceCurrency: z.string().nullable(),
+})
+export type PickedModifier = z.infer<typeof pickedModifierSchema>
+
 export const postLineSchema = z.object({
   variantId: z.string().min(1),
   /** Milésimas de unidad: 1000 = 1. En ajustes lleva signo. */
@@ -42,6 +53,13 @@ export const postLineSchema = z.object({
   lot: z
     .object({ code: z.string().trim().max(40).nullish(), expiresOn: dateSchema.nullable() })
     .optional(),
+  /**
+   * Venta: las opciones y extras elegidos (término, queso extra). Su precio ya va en
+   * `unitPriceMinor`; el servidor verifica que sean del producto.
+   */
+  modifierIds: z.array(z.string().min(1)).max(20).optional(),
+  /** Venta: indicaciones para la cocina («sin cebolla»). */
+  note: z.string().trim().max(140).nullish(),
 })
 
 export const postPaymentSchema = z.object({
@@ -70,6 +88,13 @@ export const postDocumentSchema = z.object({
   pricesIncludeTax: z.boolean().optional(),
   /** Cliente (venta) o proveedor (compra). */
   contactId: z.string().min(1).nullish(),
+  /**
+   * Venta: la propina que deja el cliente, en la moneda del documento. No suma al total ni lleva
+   * IVA ni IGTF: los pagos la cubren además de la venta.
+   */
+  tipMinor: safeInt.min(0).default(0),
+  /** Para quién es la propina (un usuario activo); vacío = para todo el equipo. */
+  tipUserId: z.string().min(1).nullish(),
   /** Número de la factura del proveedor u otra referencia. */
   externalRef: z.string().trim().max(60).nullish(),
   note: z.string().max(500).nullish(),
@@ -117,6 +142,19 @@ export const postDocumentSchema = z.object({
    * descontar, en total, lo que da el código.
    */
   discountCodeId: z.string().min(1).nullish(),
+  /**
+   * Venta que cobra (toda o parte de) una cuenta abierta: cuánto de cada producto de la cuenta. Las
+   * líneas de la venta deben sumar, por producto, lo mismo; la cuenta se cierra al quedar saldada.
+   */
+  tab: z
+    .object({
+      id: z.string().min(1),
+      lines: z
+        .array(z.object({ lineId: z.string().min(1), qtyMilli: safeInt.min(1) }))
+        .min(1)
+        .max(500),
+    })
+    .nullish(),
 })
 export type PostDocumentBody = z.infer<typeof postDocumentSchema>
 
@@ -231,14 +269,31 @@ export const surchargeSchema = z.object({
   active: z.boolean(),
 })
 
-// Catálogo. Por ahora cada producto tiene una sola variante (la que se vende).
+// Catálogo. Cada producto se vende en una variante o, si tiene tallas y colores, en una por
+// combinación; la lista de productos trae una fila por variante.
 
 export const productKindSchema = z.enum(["good", "service"])
+
+const optionValueSchema = z.string().trim().min(1, "Escribe el valor").max(30)
+
+/** Una característica (Talla) con sus valores en el orden en que se muestran (S, M, L). */
+export const productOptionSchema = z.object({
+  name: z.string().trim().min(1, "Escribe el nombre de la característica").max(30),
+  values: z.array(optionValueSchema).min(1, "Agrega al menos un valor").max(MAX_VARIANTS),
+})
+export type ProductOptionInput = z.infer<typeof productOptionSchema>
 
 export const catalogItemSchema = z.object({
   productId: z.string(),
   variantId: z.string(),
+  /** El nombre con que se vende: con la talla y el color si los tiene, «Camisa (M, Azul)». */
   name: z.string(),
+  /** El nombre del producto, sin la combinación. */
+  productName: z.string(),
+  /** Los valores de la combinación en el orden de `options`; null si no tiene. */
+  optionValues: z.array(z.string()).nullable(),
+  /** Las características del producto con sus valores; null si se vende de una sola forma. */
+  options: z.array(productOptionSchema).nullable(),
   kind: productKindSchema,
   sku: z.string(),
   barcode: z.string().nullable(),
@@ -247,6 +302,7 @@ export const catalogItemSchema = z.object({
   /** null = el impuesto por defecto del negocio. */
   taxId: z.string().nullable(),
   tracksStock: z.boolean(),
+  /** Se puede vender: el producto y esta variante están activos. */
   active: z.boolean(),
   /** Último costo de compra; null si no hay o si quien consulta no tiene cost.view. */
   costMinor: safeInt.nullable(),
@@ -261,6 +317,10 @@ export const catalogItemSchema = z.object({
   categoryId: z.string().nullable(),
   /** Lleva lotes con vencimiento. */
   tracksLots: z.boolean(),
+  /** Grupos de opciones y extras que se ofrecen al venderlo, en su orden. */
+  modifierGroupIds: z.array(z.string()),
+  /** Tiene receta: si no lleva existencia, sus ingredientes se descuentan al venderlo. */
+  hasRecipe: z.boolean(),
   /**
    * Producto con lotes: el próximo vencimiento de lo que hay (sin contar lo vencido) y cuánto hay
    * vencido en cada ubicación; null si no lleva lotes.
@@ -279,6 +339,30 @@ export const listPriceInputSchema = z.object({
   priceMinor: safeInt.min(0, "El precio no puede ser negativo").nullable(),
 })
 
+/**
+ * Una combinación (M, Azul) con su código y su precio. Con `id` se edita la que ya existe (y
+ * conserva su existencia, aunque cambien sus valores); sin él se crea.
+ */
+export const variantInputSchema = z.object({
+  id: z.string().min(1).optional(),
+  values: z.array(optionValueSchema).max(MAX_OPTIONS),
+  /** Si falta, se genera a partir del SKU del producto. */
+  sku: z.string().trim().min(1).max(40).optional(),
+  barcode: z.string().trim().min(1).max(40).nullish(),
+  priceMinor: safeInt.min(0, "El precio no puede ser negativo"),
+  active: z.boolean().default(true),
+})
+export type VariantInput = z.infer<typeof variantInputSchema>
+
+/** Un ingrediente de la receta: cuánto lleva una unidad (en milésimas) y la merma. */
+export const recipeInputSchema = z.object({
+  ingredientId: z.string().min(1),
+  qtyMilli: safeInt.min(1, "La cantidad debe ser mayor que cero").max(1_000_000_000),
+  /** Centésimas de punto: 1000 = 10 % de merma. */
+  wasteBp: safeInt.min(0).max(10_000).default(0),
+})
+export type RecipeInput = z.infer<typeof recipeInputSchema>
+
 export const createProductSchema = z.object({
   name: z.string().trim().min(1, "Escribe el nombre").max(120),
   kind: productKindSchema.default("good"),
@@ -296,6 +380,14 @@ export const createProductSchema = z.object({
   listPrices: z.array(listPriceInputSchema).max(50).optional(),
   /** Lleva lotes con vencimiento (solo productos, no servicios). */
   tracksLots: z.boolean().default(false),
+  /** Tallas, colores…: se crea una variante por combinación (todas, si no vienen `variants`). */
+  options: z.array(productOptionSchema).max(MAX_OPTIONS).optional(),
+  /** Las combinaciones con su código y su precio; las que falten no se crean. */
+  variants: z.array(variantInputSchema).max(MAX_VARIANTS).optional(),
+  /** Grupos de opciones y extras que se ofrecen al venderlo, en su orden. */
+  modifierGroupIds: z.array(z.string().min(1)).max(20).optional(),
+  /** Receta: los ingredientes (productos con existencia) de una unidad. */
+  recipe: z.array(recipeInputSchema).max(50).optional(),
 })
 export type CreateProductBody = z.infer<typeof createProductSchema>
 
@@ -312,8 +404,42 @@ export const updateProductSchema = z.object({
   /** Las listas que no se mencionan no cambian. */
   listPrices: z.array(listPriceInputSchema).max(50).optional(),
   tracksLots: z.boolean().optional(),
+  /**
+   * Nuevas características (null = sin tallas ni colores). Con ellas van todas las combinaciones
+   * que se siguen vendiendo en `variants`: las que no se mencionan se desactivan.
+   */
+  options: z.array(productOptionSchema).max(MAX_OPTIONS).nullable().optional(),
+  variants: z.array(variantInputSchema).max(MAX_VARIANTS).optional(),
+  /** Grupos de opciones y extras (reemplaza los que tenía). */
+  modifierGroupIds: z.array(z.string().min(1)).max(20).optional(),
+  /** Receta (reemplaza la que tenía; vacía = sin receta). */
+  recipe: z.array(recipeInputSchema).max(50).optional(),
 })
 export type UpdateProductBody = z.infer<typeof updateProductSchema>
+
+/** Un producto con todas sus variantes, también las desactivadas, en el orden de la cuadrícula. */
+export const productDetailSchema = z.object({
+  productId: z.string(),
+  name: z.string(),
+  kind: productKindSchema,
+  taxId: z.string().nullable(),
+  categoryId: z.string().nullable(),
+  tracksStock: z.boolean(),
+  tracksLots: z.boolean(),
+  active: z.boolean(),
+  options: z.array(productOptionSchema).nullable(),
+  variants: z.array(catalogItemSchema.extend({ variantActive: z.boolean() })),
+  /** Los ingredientes de una unidad, en su orden, con el nombre y el costo de hoy de cada uno. */
+  recipe: z.array(
+    recipeInputSchema.extend({
+      name: z.string(),
+      /** null si quien consulta no ve costos o el ingrediente no tiene. */
+      costMinor: safeInt.nullable(),
+      costCurrency: z.string().nullable(),
+    }),
+  ),
+})
+export type ProductDetail = z.infer<typeof productDetailSchema>
 
 // Lo que la caja necesita para arrancar, en una sola llamada.
 
@@ -387,7 +513,32 @@ export const bootstrapSchema = z.object({
     payables: z.boolean(),
     locations: z.boolean(),
     lots: z.boolean(),
+    variants: z.boolean(),
+    tables: z.boolean(),
+    modifiers: z.boolean(),
+    kitchen: z.boolean(),
+    recipes: z.boolean(),
+    tips: z.boolean(),
   }),
+  /** Los usuarios activos, para elegir a quién va una propina. */
+  staff: z.array(z.object({ id: z.string(), name: z.string() })),
+  /** Grupos de opciones y extras activos, con sus opciones activas, en su orden. */
+  modifierGroups: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      minSelect: safeInt,
+      maxSelect: safeInt.nullable(),
+      modifiers: z.array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          priceMinor: safeInt,
+          priceCurrency: z.string().nullable(),
+        }),
+      ),
+    }),
+  ),
   /** Recargos de venta activos (delivery, servicio…), en su orden. */
   charges: z.array(saleChargeInfoSchema),
   /** Listas de precios activas, en su orden, con los precios propios de cada producto. */
@@ -487,6 +638,13 @@ export const shiftReportSchema = shiftSchema.extend({
   supplierPayments: z.object({ count: safeInt, totalLegalMinor: safeInt }),
   /** Devoluciones a proveedores del turno (lo reembolsado puede entrar a la gaveta). */
   supplierReturns: z.object({ count: safeInt, totalLegalMinor: safeInt }),
+  /**
+   * Propinas cobradas en el turno, por quien las recibe (null = el equipo), netas de anulaciones y
+   * en moneda legal: el dinero está en las cuentas de cobro y se le entrega a cada quien.
+   */
+  tips: z.array(
+    z.object({ userId: z.string().nullable(), name: z.string(), totalLegalMinor: safeInt }),
+  ),
   /** Cobrado por método (vuelto y anulaciones restados), en la moneda de cada método. */
   byMethod: z.array(
     z.object({
@@ -666,6 +824,11 @@ export const documentSummarySchema = z.object({
   /** Ajuste de inventario: el motivo. */
   stockReasonId: z.string().nullable(),
   stockReasonName: z.string().nullable(),
+  /** Venta: la propina (aparte del total; negativa en el reverso) y para quién es (null = el equipo). */
+  tipMinor: safeInt,
+  tipLegalMinor: safeInt,
+  tipUserId: z.string().nullable(),
+  tipUserName: z.string().nullable(),
   /** Venta a crédito: lo que quedó a deber (negativo en el reverso). */
   creditMinor: safeInt,
   /** Moneda en que se debe lo fiado; null si no hay crédito. */
@@ -713,6 +876,10 @@ export const documentDetailSchema = documentSummarySchema.extend({
       lineTotalMinor: safeInt,
       taxId: z.string().nullable(),
       taxRateBp: safeInt,
+      /** Opciones y extras elegidos (ya incluidos en el precio). */
+      modifiers: z.array(pickedModifierSchema),
+      /** Indicaciones para la cocina. */
+      note: z.string().nullable(),
       /** Lotes que movió la línea (cantidades sin signo); vacío si el producto no lleva lotes. */
       lots: z.array(
         z.object({
@@ -721,6 +888,13 @@ export const documentDetailSchema = documentSummarySchema.extend({
           expiresOn: dateSchema.nullable(),
           qtyMilli: safeInt,
         }),
+      ),
+      /**
+       * Lo que se gastó de cada ingrediente (la receta de un plato vendido o de una producción),
+       * sin signo.
+       */
+      ingredients: z.array(
+        z.object({ variantId: z.string(), name: z.string(), qtyMilli: safeInt }),
       ),
     }),
   ),
@@ -1535,6 +1709,50 @@ export const stockAdjustmentsSchema = z.object({
 })
 export type StockAdjustments = z.infer<typeof stockAdjustmentsSchema>
 
+/** Propinas de un período por quien las recibe, netas de anulaciones. */
+export const tipsReportSchema = z.object({
+  legalCurrency: z.string(),
+  referenceCurrency: z.string(),
+  rows: z.array(
+    z.object({
+      /** null = para todo el equipo. */
+      userId: z.string().nullable(),
+      name: z.string(),
+      /** Ventas con propina (sin contar las anuladas). */
+      count: safeInt,
+      totalLegalMinor: safeInt,
+      /** En la moneda de referencia, a la tasa de cada venta; null si alguna no tenía tasa. */
+      totalReferenceMinor: safeInt.nullable(),
+    }),
+  ),
+  totalLegalMinor: safeInt,
+  totalReferenceMinor: safeInt.nullable(),
+})
+export type TipsReport = z.infer<typeof tipsReportSchema>
+
+/** Lo producido por tandas (`PRODUCTION`): una fila por producto de cada producción. */
+export const productionRowSchema = z.object({
+  id: z.string(),
+  number: z.string(),
+  postedAt: safeInt,
+  variantId: z.string(),
+  productName: z.string(),
+  /** Lo producido; el reverso lleva el signo contrario. */
+  qtyMilli: safeInt,
+  /** Costo por unidad según la receta al producir; null si no se sabe o no se puede ver. */
+  unitCostMinor: safeInt.nullable(),
+  costCurrency: z.string().nullable(),
+  locationId: z.string(),
+  locationName: z.string(),
+  note: z.string().nullable(),
+  createdBy: z.string().nullable(),
+  /** Id del reverso si se anuló. */
+  reversedBy: z.string().nullable(),
+  /** Es la anulación de otra producción. */
+  reversesDocumentId: z.string().nullable(),
+})
+export type ProductionRow = z.infer<typeof productionRowSchema>
+
 // Informes por período: resultados (utilidad), ventas e inventario valorado.
 
 /** Un rango de días ya convertido a milisegundos [from, to) en la zona horaria del negocio. */
@@ -1983,6 +2201,18 @@ export const featuresSchema = z.object({
   locations: z.boolean(),
   /** Lotes con fecha de vencimiento en los productos perecederos. */
   lots: z.boolean(),
+  /** Tallas, colores u otras características, cada combinación con su código y su existencia. */
+  variants: z.boolean(),
+  /** Salas, mesas y cuentas abiertas (restaurantes). */
+  tables: z.boolean(),
+  /** Opciones y extras al vender (término, sin cebolla, queso extra). */
+  modifiers: z.boolean(),
+  /** Comandas a la cocina o la barra: impresora de la estación o pantalla de cocina. */
+  kitchen: z.boolean(),
+  /** Recetas: los platos descuentan sus ingredientes al venderse. */
+  recipes: z.boolean(),
+  /** Propinas al cobrar, para un mesonero o para el equipo, con su informe. */
+  tips: z.boolean(),
 })
 export type Features = z.infer<typeof featuresSchema>
 
@@ -2102,6 +2332,27 @@ export const lotSettingsSchema = z.object({
 })
 export type LotSettings = z.infer<typeof lotSettingsSchema>
 
+// Etiquetas con código de barras
+
+/** Hojas de etiquetas adhesivas que se imprimen en cualquier impresora. */
+export const LABEL_SHEETS = ["letter-3x10", "letter-2x10", "a4-3x8"] as const
+
+export const labelSettingsSchema = z.object({
+  /** Rollo de una impresora de etiquetas (una etiqueta por página) u hoja con varias. */
+  paper: z.enum(["roll", ...LABEL_SHEETS]),
+  /** Tamaño de cada etiqueta del rollo, en milímetros. */
+  widthMm: z.number().int().min(20, "Mínimo 20 mm").max(120, "Máximo 120 mm"),
+  heightMm: z.number().int().min(15, "Mínimo 15 mm").max(100, "Máximo 100 mm"),
+  /**
+   * Qué precio lleva: ninguno, en la moneda en que se fijó, en la de referencia, en la legal (a la
+   * tasa del día en que se imprime) o en ambas.
+   */
+  price: z.enum(["none", "own", "reference", "legal", "both"]),
+  showBusiness: z.boolean(),
+  showSku: z.boolean(),
+})
+export type LabelSettings = z.infer<typeof labelSettingsSchema>
+
 // Códigos de descuento
 
 export const discountCodeSchema = z.object({
@@ -2147,3 +2398,323 @@ export const updateDiscountCodeSchema = z
   .partial()
   .extend({ active: z.boolean().optional() })
 export type UpdateDiscountCodeBody = z.infer<typeof updateDiscountCodeSchema>
+
+// Restaurante: salas, mesas y cuentas abiertas
+
+export const tabStatusSchema = z.enum(["open", "closed", "cancelled"])
+
+/** Una cuenta como se ve en el plano de mesas. */
+export const tabSummarySchema = z.object({
+  id: z.string(),
+  number: z.string(),
+  tableId: z.string().nullable(),
+  tableName: z.string().nullable(),
+  areaName: z.string().nullable(),
+  /** Nombre de una cuenta sin mesa («Juan», «Para llevar»). */
+  label: z.string().nullable(),
+  guests: safeInt.nullable(),
+  status: tabStatusSchema,
+  waiterId: z.string().nullable(),
+  waiterName: z.string().nullable(),
+  note: z.string().nullable(),
+  openedAt: safeInt,
+  closedAt: safeInt.nullable(),
+  /** Productos por cobrar (en milésimas) y lo que suman en cada moneda de precio. */
+  pendingQtyMilli: safeInt,
+  pending: z.array(z.object({ currency: z.string(), amountMinor: safeInt })),
+})
+export type TabSummary = z.infer<typeof tabSummarySchema>
+
+export const tabLineSchema = z.object({
+  id: z.string(),
+  variantId: z.string(),
+  name: z.string(),
+  qtyMilli: safeInt,
+  priceMinor: safeInt,
+  priceCurrency: z.string(),
+  /** IVA del producto (null = el por defecto), para armar el ticket al cobrar. */
+  taxId: z.string().nullable(),
+  note: z.string().nullable(),
+  /** Opciones y extras, con lo que suma cada uno (aparte de `priceMinor`). */
+  modifiers: z.array(pickedModifierSchema),
+  /** En la cocina: por preparar o listo; null si no fue a ninguna estación. */
+  kitchen: z.enum(["pending", "ready"]).nullable(),
+  addedAt: safeInt,
+  addedBy: z.string().nullable(),
+  voidedAt: safeInt.nullable(),
+  voidedBy: z.string().nullable(),
+  voidReason: z.string().nullable(),
+  /** La venta que lo cobró. */
+  documentId: z.string().nullable(),
+  documentNumber: z.string().nullable(),
+})
+export type TabLine = z.infer<typeof tabLineSchema>
+
+export const tabDetailSchema = tabSummarySchema.extend({
+  cancelReason: z.string().nullable(),
+  /** En el orden en que se pidieron. */
+  lines: z.array(tabLineSchema),
+})
+export type TabDetail = z.infer<typeof tabDetailSchema>
+
+export const diningTableSchema = z.object({
+  id: z.string(),
+  areaId: z.string(),
+  name: z.string(),
+  seats: safeInt.nullable(),
+  /** La cuenta abierta de la mesa; null = libre. */
+  tab: tabSummarySchema.nullable(),
+})
+export type DiningTable = z.infer<typeof diningTableSchema>
+
+/** Las salas activas con sus mesas, y las cuentas abiertas sin mesa. */
+export const diningFloorSchema = z.object({
+  areas: z.array(
+    z.object({ id: z.string(), name: z.string(), tables: z.array(diningTableSchema) }),
+  ),
+  others: z.array(tabSummarySchema),
+})
+export type DiningFloor = z.infer<typeof diningFloorSchema>
+
+/**
+ * Las salas y sus mesas, en orden, tal como deben quedar: las que traen id se renombran, las que
+ * no, se crean, y las que faltan se desactivan (si no tienen una cuenta abierta).
+ */
+export const diningLayoutSchema = z.object({
+  areas: z
+    .array(
+      z.object({
+        id: z.string().min(1).optional(),
+        name: z.string().trim().min(1, "Ponle nombre a la sala").max(40),
+        tables: z
+          .array(
+            z.object({
+              id: z.string().min(1).optional(),
+              name: z.string().trim().min(1, "Ponle nombre a la mesa").max(20),
+              seats: safeInt.min(1).max(99).nullish(),
+            }),
+          )
+          .max(200),
+      }),
+    )
+    .max(20),
+})
+export type DiningLayoutBody = z.infer<typeof diningLayoutSchema>
+
+export const openTabSchema = z
+  .object({
+    id: uuidv7Schema,
+    tableId: z.string().min(1).nullish(),
+    label: z.string().trim().max(40).nullish(),
+    guests: safeInt.min(1).max(999).nullish(),
+    note: z.string().trim().max(200).nullish(),
+  })
+  .refine((t) => t.tableId || t.label, {
+    message: "Elige la mesa o ponle nombre a la cuenta",
+    path: ["label"],
+  })
+export type OpenTabBody = z.infer<typeof openTabSchema>
+
+export const updateTabSchema = z.object({
+  label: z.string().trim().max(40).nullish(),
+  guests: safeInt.min(1).max(999).nullish(),
+  note: z.string().trim().max(200).nullish(),
+  waiterId: z.string().min(1).nullish(),
+})
+export type UpdateTabBody = z.infer<typeof updateTabSchema>
+
+/** Un pedido: lo que se agrega a la cuenta de una vez. Cada línea trae su id (reintentar no duplica). */
+export const addTabLinesSchema = z.object({
+  lines: z
+    .array(
+      z.object({
+        id: uuidv7Schema,
+        variantId: z.string().min(1),
+        qtyMilli: safeInt.min(1).max(1_000_000),
+        note: z.string().trim().max(140).nullish(),
+        modifierIds: z.array(z.string().min(1)).max(20).optional(),
+      }),
+    )
+    .min(1)
+    .max(100),
+})
+export type AddTabLinesBody = z.infer<typeof addTabLinesSchema>
+
+export const voidTabLineSchema = z.object({
+  qtyMilli: safeInt.min(1),
+  reason: z.string().trim().min(2, "Escribe por qué se anula").max(200),
+})
+export type VoidTabLineBody = z.infer<typeof voidTabLineSchema>
+
+/** Pasa la cuenta (o algunos de sus productos) a otra mesa o cuenta; si está ocupada, se juntan. */
+export const moveTabSchema = z
+  .object({
+    tableId: z.string().min(1).optional(),
+    tabId: z.string().min(1).optional(),
+    /** Solo estos productos y cuánto de cada uno; si falta, toda la cuenta. */
+    lines: z
+      .array(z.object({ lineId: z.string().min(1), qtyMilli: safeInt.min(1) }))
+      .min(1)
+      .max(500)
+      .optional(),
+  })
+  .refine((m) => !m.tableId !== !m.tabId, {
+    message: "Elige la mesa o la cuenta a la que pasa",
+    path: ["tableId"],
+  })
+export type MoveTabBody = z.infer<typeof moveTabSchema>
+
+export const cancelTabSchema = z.object({ reason: z.string().trim().max(200).nullish() })
+export type CancelTabBody = z.infer<typeof cancelTabSchema>
+
+/**
+ * Una precuenta ya armada (con los montos escritos como se ven en pantalla) para imprimirla en la
+ * térmica: no es un documento, solo lo que la mesa debe hasta ahora.
+ */
+export const printBillSchema = z.object({
+  title: z.string().max(60),
+  info: z.array(z.string().max(120)).max(10),
+  items: z
+    .array(
+      z.object({
+        name: z.string().max(200),
+        detail: z.string().max(200),
+        amount: z.string().max(40),
+      }),
+    )
+    .max(300),
+  rows: z
+    .array(
+      z.object({
+        label: z.string().max(120),
+        amount: z.string().max(40),
+        bold: z.boolean().optional(),
+      }),
+    )
+    .max(30),
+  footer: z.array(z.string().max(200)).max(10),
+})
+export type PrintBillBody = z.infer<typeof printBillSchema>
+
+// Opciones y extras
+
+export const modifierGroupSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  minSelect: safeInt,
+  maxSelect: safeInt.nullable(),
+  active: z.boolean(),
+  /** Las opciones, también las desactivadas, en su orden. */
+  modifiers: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      priceMinor: safeInt,
+      priceCurrency: z.string().nullable(),
+      active: z.boolean(),
+    }),
+  ),
+  /** Productos activos que lo ofrecen. */
+  productCount: safeInt,
+})
+export type ModifierGroup = z.infer<typeof modifierGroupSchema>
+
+/**
+ * Un grupo con sus opciones tal como deben quedar: las que traen id se editan, las nuevas se
+ * crean y las que faltan se desactivan (las ventas pasadas conservan su nombre y su precio).
+ */
+export const saveModifierGroupSchema = z
+  .object({
+    name: z.string().trim().min(1, "Ponle nombre al grupo").max(40),
+    minSelect: safeInt.min(0).max(20).default(0),
+    maxSelect: safeInt.min(1).max(20).nullable().default(null),
+    active: z.boolean().default(true),
+    modifiers: z
+      .array(
+        z.object({
+          id: z.string().min(1).optional(),
+          name: z.string().trim().min(1, "Ponle nombre a la opción").max(40),
+          priceMinor: safeInt.min(0).default(0),
+          priceCurrency: currencyCodeSchema.nullish(),
+        }),
+      )
+      .min(1, "Agrega al menos una opción")
+      .max(40),
+  })
+  .refine((g) => g.maxSelect === null || g.maxSelect >= Math.max(g.minSelect, 1), {
+    message: "El máximo no puede ser menor que el mínimo",
+    path: ["maxSelect"],
+  })
+  .refine((g) => g.minSelect <= g.modifiers.length, {
+    message: "Hay que elegir más opciones de las que hay",
+    path: ["minSelect"],
+  })
+  .refine((g) => g.modifiers.every((m) => m.priceMinor === 0 || m.priceCurrency), {
+    message: "Elige la moneda del precio",
+    path: ["modifiers"],
+  })
+export type SaveModifierGroupBody = z.infer<typeof saveModifierGroupSchema>
+
+// Comandas a cocina
+
+/** La impresora de una estación: de red, compartida en Windows o un dispositivo. */
+export const stationPrinterSchema = printerSettingsSchema
+  .pick({ host: true, port: true, share: true, device: true, paperWidth: true })
+  .extend({ mode: z.enum(["network", "windows", "device"]) })
+export type StationPrinter = z.infer<typeof stationPrinterSchema>
+
+export const kitchenStationSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  /** Categorías que prepara; null = todo lo que no va a otra estación. */
+  categoryIds: z.array(z.string()).nullable(),
+  /** null = solo la pantalla de cocina. */
+  printer: stationPrinterSchema.nullable(),
+  /** También recibe lo vendido directo en la caja. */
+  counterSales: z.boolean(),
+  /** Minutos en que debería estar listo. */
+  targetMinutes: safeInt,
+  active: z.boolean(),
+})
+export type KitchenStation = z.infer<typeof kitchenStationSchema>
+
+export const saveKitchenStationSchema = z.object({
+  name: z.string().trim().min(1, "Ponle nombre a la estación").max(40),
+  categoryIds: z.array(z.string().min(1)).max(100).nullable(),
+  printer: stationPrinterSchema.nullable(),
+  counterSales: z.boolean().default(true),
+  targetMinutes: safeInt.min(1).max(240).default(15),
+  active: z.boolean().default(true),
+})
+export type SaveKitchenStationBody = z.infer<typeof saveKitchenStationSchema>
+
+export const kitchenTicketSchema = z.object({
+  id: z.string(),
+  /** Número del día. */
+  number: safeInt,
+  stationId: z.string(),
+  stationName: z.string(),
+  /** «order»: preparar; «void»: se anuló, dejar de preparar. */
+  kind: z.enum(["order", "void"]),
+  /** Para quién: «Mesa 4», «Juan (barra)», «Venta C1-000123». */
+  source: z.string(),
+  tabId: z.string().nullable(),
+  documentId: z.string().nullable(),
+  status: z.enum(["pending", "ready"]),
+  createdAt: safeInt,
+  /** Quien lo pidió. */
+  createdBy: z.string().nullable(),
+  readyAt: safeInt.nullable(),
+  printedAt: safeInt.nullable(),
+  printError: z.string().nullable(),
+  lines: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      qtyMilli: safeInt,
+      modifiers: z.array(pickedModifierSchema),
+      note: z.string().nullable(),
+    }),
+  ),
+})
+export type KitchenTicket = z.infer<typeof kitchenTicketSchema>

@@ -2,6 +2,7 @@ import { createRoute, z } from "@hono/zod-openapi"
 import {
   apiErrorSchema,
   createStockReasonSchema,
+  productionRowSchema,
   stockAdjustmentsSchema,
   stockReasonSchema,
   updateStockReasonSchema,
@@ -10,7 +11,13 @@ import type { Permission } from "@millhiore/domain"
 import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
-import { createStockReason, listAdjustments, listStockReasons, updateStockReason } from "./service"
+import {
+  createStockReason,
+  listAdjustments,
+  listProduction,
+  listStockReasons,
+  updateStockReason,
+} from "./service"
 
 const err = { content: { "application/json": { schema: apiErrorSchema } } }
 const json = <T extends z.ZodType>(schema: T) => ({ "application/json": { schema } })
@@ -84,6 +91,26 @@ const adjustmentsRoute = createRoute({
   },
 })
 
+const productionRoute = createRoute({
+  method: "get",
+  path: "/api/production",
+  tags: ["Inventario"],
+  summary: "Lo producido por tandas en un período",
+  description:
+    "Una fila por producto de cada producción (`PRODUCTION`), con el costo por unidad que salió de su receta. Sin `cost.view`, los costos van vacíos.",
+  request: {
+    query: z.object({
+      /** Desde/hasta (ms Unix, hasta excluido). */
+      from: z.coerce.number().int().optional(),
+      to: z.coerce.number().int().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Producción", content: json(z.array(productionRowSchema)) },
+    403: { description: "Sin permiso", ...err },
+  },
+})
+
 export function registerInventoryRoutes(app: App, deps: AppDeps): void {
   const checkView = (permissions: ReadonlySet<Permission>) => {
     if (!VIEWERS.some((p) => permissions.has(p))) {
@@ -115,6 +142,15 @@ export function registerInventoryRoutes(app: App, deps: AppDeps): void {
     checkView(permissions)
     return c.json(
       listAdjustments(deps.db, { ...c.req.valid("query"), seeCost: permissions.has("cost.view") }),
+      200,
+    )
+  })
+
+  app.openapi(productionRoute, (c) => {
+    const { permissions } = actorOf(c)
+    checkView(permissions)
+    return c.json(
+      listProduction(deps.db, { ...c.req.valid("query"), seeCost: permissions.has("cost.view") }),
       200,
     )
   })
