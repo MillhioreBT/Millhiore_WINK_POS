@@ -4,6 +4,7 @@ import {
   accountMove,
   allocation,
   auditLog,
+  branch,
   business,
   cashShift,
   contact,
@@ -29,10 +30,12 @@ import {
   stockMove,
   stockReason,
   surcharge,
+  syncPeer,
   tax,
   terminal,
   user,
   variant,
+  webOrder,
 } from "@millhiore/db"
 import {
   type CurrencyBook,
@@ -56,6 +59,7 @@ import {
   lineTotal,
   localDate,
   money,
+  normalizeTaxId,
   type PlannedLine,
   type PlannedStockMove,
   PostingError,
@@ -129,6 +133,10 @@ export interface PostDocumentInput {
   pricesIncludeTax?: boolean | undefined
   /** Cliente (venta) o proveedor (compra). */
   contactId?: string | null | undefined
+  /** Datos fiscales escritos en la caja; si faltan, los del contacto. */
+  customer?: { name: string; taxId: string; address?: string | null | undefined } | null | undefined
+  /** Venta con factura: exige el nombre y la cédula o el RIF del cliente. */
+  invoice?: boolean | undefined
   /** Número de la factura del proveedor u otra referencia externa. */
   externalRef?: string | null | undefined
   note?: string | null | undefined
@@ -164,6 +172,8 @@ export interface PostDocumentInput {
   charges?: readonly { chargeId: string; amountMinor?: number | undefined }[] | undefined
   /** Venta que sale de una cotización abierta: queda convertida en la misma transacción. */
   quoteId?: string | null | undefined
+  /** Venta que cobra un pedido del catálogo: queda atendido en la misma transacción. */
+  webOrderId?: string | null | undefined
   /**
    * Compra, ajuste o traslado: la ubicación cuya existencia cambia (en el traslado, el origen).
    * Si falta, la de la caja. Las ventas y devoluciones mueven siempre la ubicación de su caja.
@@ -204,6 +214,54 @@ export interface PostContext {
     pricesIncludeTax: boolean
     /** IVA de los productos sin uno asignado. */
     defaultTaxId: string
+  }
+  /** Sucursales donde registra quien lo hace; null o ausente, en todas. */
+  branchIds?: ReadonlySet<string> | null
+}
+
+/**
+ * Quien trabaja solo en algunas sucursales registra solo en ellas: la caja y la ubicación de la
+ * que sale lo registrado (un traslado sí puede llegar a otra sucursal).
+ */
+export function requireOwnBranch(
+  tx: Pick<Db, "select">,
+  ctx: Pick<PostContext, "branchIds">,
+  locationIds: readonly string[],
+): void {
+  const allowed = ctx.branchIds
+  if (!allowed) return
+  for (const id of new Set(locationIds)) {
+    const row = tx
+      .select({ branchId: location.branchId, name: branch.name })
+      .from(location)
+      .leftJoin(branch, eq(branch.id, location.branchId))
+      .where(eq(location.id, id))
+      .get()
+    if (row && !allowed.has(row.branchId ?? "")) {
+      throw new PostingError("OTHER_BRANCH", `No trabajas en la sucursal ${row.name ?? ""}`.trim())
+    }
+  }
+}
+
+/**
+ * En el central: lo de una sucursal con su propio servidor (sus cajas, sus ubicaciones) se
+ * registra allá, nunca aquí (los dos servidores numerarían y moverían lo mismo).
+ */
+export function requireLocalServer(tx: Pick<Db, "select">, locationIds: readonly string[]): void {
+  for (const id of new Set(locationIds)) {
+    const row = tx
+      .select({ name: branch.name })
+      .from(location)
+      .innerJoin(branch, eq(branch.id, location.branchId))
+      .innerJoin(syncPeer, eq(syncPeer.branchId, branch.id))
+      .where(eq(location.id, id))
+      .get()
+    if (row) {
+      throw new PostingError(
+        "OTHER_SERVER",
+        `La sucursal ${row.name} tiene su propio servidor: eso se registra allá`,
+      )
+    }
   }
 }
 
@@ -535,6 +593,8 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
   }
   const locationId = input.locationId || term.locationId
   if (locationId !== term.locationId) requireActiveLocation(tx, locationId)
+  requireOwnBranch(tx, ctx, [term.locationId, locationId])
+  requireLocalServer(tx, [term.locationId, locationId])
   const toLocationId = input.type === "STOCK_TRANSFER" ? (input.toLocationId ?? null) : null
   if (toLocationId) requireActiveLocation(tx, toLocationId)
   const book = loadBook(tx)
@@ -546,6 +606,9 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
           active: contact.active,
           creditDays: contact.creditDays,
           creditLimitMinor: contact.creditLimitMinor,
+          name: contact.name,
+          taxId: contact.taxId,
+          address: contact.address,
         })
         .from(contact)
         .where(eq(contact.id, input.contactId))
@@ -954,6 +1017,17 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       throw new PostingError("QUOTE_CLOSED", `La cotización ${q.number} ya no está abierta`)
     }
   }
+  // Un pedido del catálogo se cobra una sola vez, y solo mientras no esté atendido ni descartado.
+  if (input.webOrderId) {
+    const o = tx.select().from(webOrder).where(eq(webOrder.id, input.webOrderId)).get()
+    if (input.type !== "SALE" || !o) {
+      throw new PostingError("UNKNOWN_REFERENCE", "Solo una venta cobra un pedido")
+    }
+    if (o.status !== "new") {
+      const n = `P-${String(o.number).padStart(6, "0")}`
+      throw new PostingError("ORDER_CLOSED", `El pedido ${n} ya fue atendido o descartado`)
+    }
+  }
   const tabTaken = checkTabPayment(tx, input)
   // La propina es de una venta y, si es para alguien, para un usuario activo.
   const tipMinor = input.tipMinor ?? 0
@@ -1110,6 +1184,35 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       ? (explicitDue ?? (party?.creditDays ? ctx.now + party.creditDays * DAY_MS : null))
       : null
 
+  // Los datos fiscales de quien compra (o vende) quedan tal como son hoy: lo escrito en la caja,
+  // los del contacto o, en una devolución, los de la venta.
+  const customer = input.customer
+    ? {
+        name: input.customer.name.trim(),
+        taxId: normalizeTaxId(input.customer.taxId.trim()),
+        address: input.customer.address?.trim() || null,
+      }
+    : party
+      ? { name: party.name, taxId: party.taxId, address: party.address }
+      : returnOf
+        ? {
+            name: returnOf.customerName,
+            taxId: returnOf.customerTaxId,
+            address: returnOf.customerAddress,
+          }
+        : null
+  if (input.invoice) {
+    if (input.type !== "SALE") {
+      throw new PostingError("UNSUPPORTED_TYPE", "Solo una venta lleva factura")
+    }
+    if (!customer?.name || !customer.taxId) {
+      throw new PostingError(
+        "CUSTOMER_REQUIRED",
+        "Para la factura hacen falta el nombre y la cédula o el RIF del cliente",
+      )
+    }
+  }
+
   const number = formatDocumentNumber(term.code, input.type, nextNumber(tx, term.id, input.type))
   tx.insert(document)
     .values({
@@ -1127,6 +1230,10 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
       pricesIncludeTax: draft.pricesIncludeTax,
       shiftId,
       contactId: input.contactId ?? null,
+      customerName: customer?.name ?? null,
+      customerTaxId: customer?.taxId ?? null,
+      customerAddress: customer?.address ?? null,
+      invoiceRequested: input.invoice === true,
       returnsDocumentId: isReturn(input.type) ? (returnOf?.id ?? null) : null,
       expenseCategoryId,
       stockReasonId,
@@ -1195,6 +1302,17 @@ export function postDocumentIn(tx: Tx, input: PostDocumentInput, ctx: PostContex
     tx.update(quote)
       .set({ status: "converted", documentId: input.id, closedAt: ctx.now })
       .where(eq(quote.id, input.quoteId))
+      .run()
+  }
+  if (input.webOrderId) {
+    tx.update(webOrder)
+      .set({
+        status: "done",
+        documentId: input.id,
+        handledBy: ctx.actorId,
+        handledAt: ctx.now,
+      })
+      .where(eq(webOrder.id, input.webOrderId))
       .run()
   }
   if (input.tab && tabTaken) settleTab(tx, input.tab.id, tabTaken, input.id, ctx.now)
@@ -1558,6 +1676,8 @@ export function voidDocument(
       if (original.reversesDocumentId) {
         throw new PostingError("NOT_REVERSIBLE", "Un documento de reverso no se puede anular")
       }
+      requireOwnBranch(tx, ctx, [original.locationId])
+      requireLocalServer(tx, [original.locationId])
       const already = tx
         .select({ id: document.id })
         .from(document)
@@ -1625,6 +1745,9 @@ export function voidDocument(
         // El reverso pertenece al turno en que se anula: de esa gaveta sale o entra el dinero.
         shiftId: openShiftOf(tx, original.terminalId),
         reversesDocumentId: original.id,
+        // Anular una venta con factura no pide otra factura (lo que pida la norma, la nota de
+        // crédito, queda para el adaptador fiscal).
+        invoiceRequested: false,
         note: reason,
         createdBy: ctx.actorId,
         postedAt: ctx.now,

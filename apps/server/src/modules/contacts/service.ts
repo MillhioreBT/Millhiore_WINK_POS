@@ -1,22 +1,11 @@
 import type { Contact, CreateContactBody, UpdateContactBody } from "@millhiore/contracts"
 import { auditLog, contact, type Db } from "@millhiore/db"
-import { uuidv7 } from "@millhiore/domain"
+import { normalizeTaxId, uuidv7 } from "@millhiore/domain"
 import { and, asc, eq, inArray, like, or } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
 import { requireActivePriceList } from "../catalog/priceLists"
 
-/** "v12345678" → "V-12345678"; "j123456789" → "J-12345678-9" (formato del RIF). */
-export function normalizeTaxId(raw: string | null | undefined): string | null {
-  if (!raw) return null
-  const compact = raw.toUpperCase().replace(/[^A-Z0-9]/g, "")
-  const letter = compact[0] ?? ""
-  const digits = compact.slice(1)
-  if (letter === "V" || letter === "E") return `${letter}-${digits}`
-  // RIF jurídico: 8 dígitos + dígito verificador.
-  return digits.length === 9
-    ? `${letter}-${digits.slice(0, 8)}-${digits.slice(8)}`
-    : `${letter}-${digits}`
-}
+export { normalizeTaxId }
 
 export function listContacts(
   db: Db,

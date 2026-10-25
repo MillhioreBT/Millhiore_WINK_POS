@@ -26,6 +26,7 @@ import {
 import { and, eq, gte, inArray, isNotNull, lt, ne, sql } from "drizzle-orm"
 import { alias } from "drizzle-orm/sqlite-core"
 import { HttpError } from "../../http/errors"
+import { inBranches } from "../branches/service"
 import { listAdjustments } from "../inventory/service"
 import { rateAt } from "../rates/service"
 
@@ -92,11 +93,12 @@ function lineCostLegal(
  */
 export function resultsReport(
   db: Db,
-  opts: { from: number; to: number; seeCost: boolean },
+  opts: { from: number; to: number; seeCost: boolean; branchIds?: readonly string[] | null },
 ): ResultsReport {
   const { biz, book } = setup(db)
   const legal = biz.legalCurrency
   const { from, to } = opts
+  const inScope = and(inRange(from, to), inBranches(document.locationId, opts.branchIds ?? null))
 
   // Ventas
   const sales = { count: 0, total: 0, tax: 0, discount: 0, surcharge: 0 }
@@ -105,7 +107,7 @@ export function resultsReport(
       .select({ id: documentTax.documentId, tax: sql<number>`sum(${documentTax.taxLegalMinor})` })
       .from(documentTax)
       .innerJoin(document, eq(document.id, documentTax.documentId))
-      .where(and(inArray(document.type, ["SALE", "RETURN"]), inRange(from, to)))
+      .where(and(inArray(document.type, ["SALE", "RETURN"]), inScope))
       .groupBy(documentTax.documentId)
       .all()
       .map((r) => [r.id, r.tax]),
@@ -120,7 +122,7 @@ export function resultsReport(
       surcharge: document.surchargeLegalMinor,
     })
     .from(document)
-    .where(and(inArray(document.type, ["SALE", "RETURN"]), inRange(from, to)))
+    .where(and(inArray(document.type, ["SALE", "RETURN"]), inScope))
     .all()) {
     const sign = signOf(d.type)
     if (d.type === "SALE") sales.count += d.reverses ? -1 : 1
@@ -147,7 +149,7 @@ export function resultsReport(
     .innerJoin(document, eq(document.id, documentLine.documentId))
     .innerJoin(variant, eq(variant.id, documentLine.variantId))
     .innerJoin(product, eq(product.id, variant.productId))
-    .where(and(inArray(document.type, ["SALE", "RETURN"]), inRange(from, to)))
+    .where(and(inArray(document.type, ["SALE", "RETURN"]), inScope))
     .all()) {
     const cost = lineCostLegal(db, book, legal, l)
     if (cost === null) {
@@ -166,7 +168,7 @@ export function resultsReport(
     })
     .from(document)
     .leftJoin(expenseCategory, eq(expenseCategory.id, document.expenseCategoryId))
-    .where(and(eq(document.type, "EXPENSE"), inRange(from, to)))
+    .where(and(eq(document.type, "EXPENSE"), inScope))
     .groupBy(document.expenseCategoryId)
     .all()
     .filter((c) => c.count !== 0 || c.total !== 0)
@@ -182,7 +184,13 @@ export function resultsReport(
   }
 
   // Pérdidas de inventario: salidas por ajuste menos entradas por ajuste, a costo
-  const adjustments = listAdjustments(db, { from, to, limit: 1, seeCost: true })
+  const adjustments = listAdjustments(db, {
+    from,
+    to,
+    limit: 1,
+    seeCost: true,
+    branchIds: opts.branchIds,
+  })
   const inventoryLoss = (adjustments.outLegalMinor ?? 0) - (adjustments.inLegalMinor ?? 0)
 
   // Comisiones de bancos y puntos de venta
@@ -195,7 +203,7 @@ export function resultsReport(
     })
     .from(payment)
     .innerJoin(document, eq(document.id, payment.documentId))
-    .where(and(ne(payment.commissionMinor, 0), inRange(from, to)))
+    .where(and(ne(payment.commissionMinor, 0), inScope))
     .all()) {
     commissions += toLegalAt(db, book, legal, p.commission, p.currency, p.postedAt) ?? 0
   }
@@ -207,7 +215,7 @@ export function resultsReport(
       total: sql<number>`coalesce(sum(case when ${document.type} = 'PURCHASE_RETURN' then -${document.totalLegalMinor} else ${document.totalLegalMinor} end), 0)`,
     })
     .from(document)
-    .where(and(inArray(document.type, ["PURCHASE", "PURCHASE_RETURN"]), inRange(from, to)))
+    .where(and(inArray(document.type, ["PURCHASE", "PURCHASE_RETURN"]), inScope))
     .get()
 
   const net = sales.total - sales.tax
@@ -241,12 +249,13 @@ export function resultsReport(
 /** Ventas de un rango: por día, por producto (con utilidad), por método de pago y por vendedor. */
 export function salesReport(
   db: Db,
-  opts: { from: number; to: number; seeCost: boolean },
+  opts: { from: number; to: number; seeCost: boolean; branchIds?: readonly string[] | null },
 ): SalesReport {
   const { biz, book } = setup(db)
   const legal = biz.legalCurrency
   const tz = biz.timezone
   const { from, to } = opts
+  const inScope = and(inRange(from, to), inBranches(document.locationId, opts.branchIds ?? null))
 
   const docs = db
     .select({
@@ -264,7 +273,7 @@ export function salesReport(
       createdBy: document.createdBy,
     })
     .from(document)
-    .where(and(inArray(document.type, ["SALE", "RETURN"]), inRange(from, to)))
+    .where(and(inArray(document.type, ["SALE", "RETURN"]), inScope))
     .all()
   const reversed = new Set(
     db
@@ -279,7 +288,7 @@ export function salesReport(
       .select({ id: documentTax.documentId, tax: sql<number>`sum(${documentTax.taxLegalMinor})` })
       .from(documentTax)
       .innerJoin(document, eq(document.id, documentTax.documentId))
-      .where(and(inArray(document.type, ["SALE", "RETURN"]), inRange(from, to)))
+      .where(and(inArray(document.type, ["SALE", "RETURN"]), inScope))
       .groupBy(documentTax.documentId)
       .all()
       .map((r) => [r.id, r.tax]),
@@ -352,7 +361,7 @@ export function salesReport(
     .innerJoin(variant, eq(variant.id, documentLine.variantId))
     .innerJoin(product, eq(product.id, variant.productId))
     .leftJoin(category, eq(category.id, product.categoryId))
-    .where(and(inArray(document.type, ["SALE", "RETURN"]), inRange(from, to)))
+    .where(and(inArray(document.type, ["SALE", "RETURN"]), inScope))
     .all()) {
     const d = docInfo.get(l.documentId)
     if (!d) continue
@@ -398,7 +407,7 @@ export function salesReport(
     .from(payment)
     .innerJoin(document, eq(document.id, payment.documentId))
     .innerJoin(paymentMethod, eq(paymentMethod.id, payment.paymentMethodId))
-    .where(and(inArray(document.type, ["SALE", "PAYMENT_IN", "RETURN"]), inRange(from, to)))
+    .where(and(inArray(document.type, ["SALE", "PAYMENT_IN", "RETURN"]), inScope))
     .groupBy(payment.paymentMethodId, payment.currency)
     .all()
     .filter((m) => m.amountMinor !== 0)
@@ -484,11 +493,22 @@ export function salesReport(
 /** El inventario de hoy: existencia, costo, lo que vale a costo y a precio de venta, producto por producto. */
 export function inventoryReport(
   db: Db,
-  opts: { now: number; seeCost: boolean; locationId?: string | undefined },
+  opts: {
+    now: number
+    seeCost: boolean
+    locationId?: string | undefined
+    /** Sin ubicación, lo de estas sucursales; null, todas. */
+    branchIds?: readonly string[] | null
+  },
 ): InventoryReport {
   const { biz, book } = setup(db)
   const legal = biz.legalCurrency
-  const here = opts.locationId ? sql` and ${stockBalance.locationId} = ${opts.locationId}` : sql``
+  const branches = inBranches(stockBalance.locationId, opts.branchIds ?? null)
+  const here = opts.locationId
+    ? sql` and ${stockBalance.locationId} = ${opts.locationId}`
+    : branches
+      ? sql` and ${branches}`
+      : sql``
   const stock = sql<number>`coalesce((select sum(${stockBalance.qtyMilli}) from ${stockBalance}
     where ${stockBalance.variantId} = ${variant.id}${here}), 0)`
   const categories = alias(category, "cat")

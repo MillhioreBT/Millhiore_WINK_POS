@@ -55,6 +55,11 @@ const OPTIONS: { key: keyof Toggles; label: string; hint: string }[] = [
     hint: "Depósito, otra tienda o un segundo mostrador: existencia en cada sitio, traslados y una caja con su propio turno en cada mostrador.",
   },
   {
+    key: "branches",
+    label: "Sucursales",
+    hint: "Otro local contra este mismo servidor: cada sucursal con sus ubicaciones, sus cajas, su lista de precios y sus datos en el recibo; el personal trabaja en las suyas y los informes se ven por sucursal.",
+  },
+  {
     key: "lots",
     label: "Lotes con vencimiento",
     hint: "Para perecederos: cada compra anota su fecha de vencimiento, la caja vende primero lo que vence antes y se avisa de lo que va a vencer.",
@@ -89,13 +94,28 @@ const OPTIONS: { key: keyof Toggles; label: string; hint: string }[] = [
     label: "Propinas",
     hint: "Al cobrar se anota la propina y para quién es; el cierre del turno y los informes dicen cuánto le toca a cada mesonero.",
   },
+  {
+    key: "scale",
+    label: "Balanza",
+    hint: "Para charcutería, carnicería o frutería: la caja lee las etiquetas con el peso o el precio que imprime la balanza, o pesa directo en una balanza conectada a la PC.",
+  },
+  {
+    key: "catalog",
+    label: "Catálogo en línea",
+    hint: "Una página con tus productos, sus fotos y sus precios en $ y Bs para compartir por WhatsApp o Instagram. Se arma en Ajustes → Integraciones.",
+  },
 ]
 
 /**
- * Lo que suele usar cada tipo de negocio; después se ajusta casilla por casilla. Las ubicaciones
- * dependen del local y los lotes de lo que se vende, no del tipo de negocio: ningún perfil los toca.
+ * Lo que suele usar cada tipo de negocio; después se ajusta casilla por casilla. Las ubicaciones y
+ * las sucursales dependen del local y los lotes de lo que se vende, no del tipo de negocio, y
+ * publicar los precios en internet lo decide cada uno: ningún perfil los toca.
  */
-const PRESETS: { id: string; label: string; toggles: Omit<Toggles, "locations" | "lots"> }[] = [
+const PRESETS: {
+  id: string
+  label: string
+  toggles: Omit<Toggles, "locations" | "lots" | "branches" | "catalog">
+}[] = [
   {
     id: "bodega",
     label: "Bodega o abasto",
@@ -112,6 +132,7 @@ const PRESETS: { id: string; label: string; toggles: Omit<Toggles, "locations" |
       kitchen: false,
       recipes: false,
       tips: false,
+      scale: true,
     },
   },
   {
@@ -130,6 +151,7 @@ const PRESETS: { id: string; label: string; toggles: Omit<Toggles, "locations" |
       kitchen: false,
       recipes: false,
       tips: false,
+      scale: false,
     },
   },
   {
@@ -148,6 +170,7 @@ const PRESETS: { id: string; label: string; toggles: Omit<Toggles, "locations" |
       kitchen: false,
       recipes: false,
       tips: false,
+      scale: false,
     },
   },
   {
@@ -166,6 +189,7 @@ const PRESETS: { id: string; label: string; toggles: Omit<Toggles, "locations" |
       kitchen: true,
       recipes: true,
       tips: true,
+      scale: false,
     },
   },
   {
@@ -184,9 +208,17 @@ const PRESETS: { id: string; label: string; toggles: Omit<Toggles, "locations" |
       kitchen: false,
       recipes: false,
       tips: false,
+      scale: false,
     },
   },
 ]
+
+/** Las sucursales tienen sus ubicaciones y sus cajas: van de la mano con «Varias ubicaciones». */
+function linked(key: keyof Toggles, on: boolean): Partial<Toggles> {
+  if (key === "branches" && on) return { branches: true, locations: true }
+  if (key === "locations" && !on) return { locations: false, branches: false }
+  return { [key]: on }
+}
 
 /**
  * Funciones que el comercio usa. Las apagadas se esconden del menú y de la caja; no se borra nada
@@ -265,7 +297,7 @@ export function FeaturesCard() {
                 disabled={!current || busy}
                 onChange={(e) =>
                   void save(
-                    { [o.key]: e.target.checked },
+                    linked(o.key, e.target.checked),
                     `${o.label}: ${e.target.checked ? "encendido" : "apagado"}`,
                   )
                 }

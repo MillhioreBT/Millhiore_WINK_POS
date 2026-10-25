@@ -13,6 +13,7 @@ import {
   lineKey,
   makeContext,
   type PaymentEntry,
+  qtyForMoney,
   type StoredLine,
   unitPriceInDoc,
   unitWithModifiers,
@@ -29,8 +30,9 @@ const bootstrap = (taxpayer: "ordinary" | "special" | "none" = "special"): Boots
     phone: null,
     receiptFooter: null,
   },
-  terminals: [{ id: "t", code: "C1", name: "Caja 1", locationId: "l" }],
-  locations: [{ id: "l", name: "Tienda", kind: "store" }],
+  terminals: [{ id: "t", code: "C1", name: "Caja 1", locationId: "l", branchId: "main" }],
+  branches: [{ id: "main", name: "Principal", address: null, phone: null, priceListId: null }],
+  locations: [{ id: "l", name: "Tienda", kind: "store", branchId: "main" }],
   discountCodes: 0,
   features: {
     quotes: true,
@@ -46,7 +48,11 @@ const bootstrap = (taxpayer: "ordinary" | "special" | "none" = "special"): Boots
     kitchen: false,
     recipes: false,
     tips: false,
+    scale: false,
+    branches: false,
+    catalog: false,
   },
+  scale: null,
   staff: [],
   modifierGroups: [],
   charges: [
@@ -124,9 +130,10 @@ const bootstrap = (taxpayer: "ordinary" | "special" | "none" = "special"): Boots
     },
     { id: "exento", code: "E", name: "Exento", kind: "exempt", rateBp: 0, active: true },
   ],
-  fiscal: { taxpayer, pricesIncludeTax: true, defaultTaxId: "iva-general" },
+  fiscal: { taxpayer, pricesIncludeTax: true, defaultTaxId: "iva-general", invoices: false },
   credit: { enabled: true },
   security: { autoLockMinutes: 0 },
+  central: null,
 })
 
 const ctx = makeContext(bootstrap(), "877.9023")
@@ -403,6 +410,20 @@ describe("recargos en la caja", () => {
   test("sin productos no hay recargos, y un recargo desconocido se ignora", () => {
     expect(buildCart(ctx, [], null, null, [{ chargeId: "delivery" }]).ticket.totalMinor).toBe(0)
     expect(buildCart(ctx, [line()], null, null, [{ chargeId: "nope" }]).ticket.charges).toEqual([])
+  })
+})
+
+describe("venta por peso", () => {
+  test("lo que pide el cliente en dinero se pasa a peso al precio por kilo", () => {
+    // Queso a 12 $ el kilo (Bs 10.534,83): 5 $ son 0,417 kg y Bs 100, 0,009 kg.
+    const perKg = unitPriceInDoc(ctx, 1200, "USD")
+    expect(perKg).toBe(1_053_483)
+    expect(qtyForMoney(ctx, { minor: 500, currency: "USD" }, perKg)).toBe(417)
+    expect(qtyForMoney(ctx, { minor: 10_000, currency: "VES" }, perKg)).toBe(9)
+    expect(qtyForMoney(ctx, { minor: 500, currency: "USD" }, null)).toBeNull()
+    // Sin tasa no se convierten dólares.
+    const noRate = makeContext(bootstrap(), null)
+    expect(qtyForMoney(noRate, { minor: 500, currency: "USD" }, perKg)).toBeNull()
   })
 })
 

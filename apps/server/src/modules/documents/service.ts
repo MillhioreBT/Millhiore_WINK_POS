@@ -1,6 +1,7 @@
 import type { DocumentDetail, DocumentSummary } from "@millhiore/contracts"
 import {
   allocation,
+  branch,
   contact,
   type Db,
   discountCode,
@@ -10,10 +11,12 @@ import {
   documentSurcharge,
   documentTax,
   expenseCategory,
+  fiscalInvoice,
   location,
   lot,
   payment,
   paymentMethod,
+  product,
   stockMove,
   stockReason,
   terminal,
@@ -21,9 +24,11 @@ import {
   variant,
 } from "@millhiore/db"
 import { DOCUMENT_TYPES, type DocumentType } from "@millhiore/domain"
-import { and, asc, desc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm"
+import { and, asc, desc, eq, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm"
 import { alias } from "drizzle-orm/sqlite-core"
 import { HttpError } from "../../http/errors"
+import { inBranches } from "../branches/service"
+import { features } from "../features/routes"
 
 const reversal = alias(document, "reversal")
 /** La venta de la que es una devolución. */
@@ -48,8 +53,20 @@ const summaryColumns = {
   reversedBy: reversal.id,
   createdBy: user.name,
   contactId: document.contactId,
-  contactName: contact.name,
-  contactTaxId: contact.taxId,
+  // Los datos que quedaron en el documento; los documentos de antes de guardarlos, los de hoy.
+  contactName: sql<string | null>`coalesce(${document.customerName}, ${contact.name})`,
+  contactTaxId: sql<
+    string | null
+  >`case when ${document.customerName} is null then ${contact.taxId} else ${document.customerTaxId} end`,
+  contactAddress: sql<
+    string | null
+  >`case when ${document.customerName} is null then ${contact.address} else ${document.customerAddress} end`,
+  invoiceRequested: document.invoiceRequested,
+  invoice: {
+    invoiceNumber: fiscalInvoice.invoiceNumber,
+    controlNumber: fiscalInvoice.controlNumber,
+    recordedAt: fiscalInvoice.recordedAt,
+  },
   externalRef: document.externalRef,
   note: document.note,
   discountMinor: document.discountMinor,
@@ -73,6 +90,12 @@ const summaryColumns = {
   toLocationId: document.toLocationId,
   toLocationName: destination.name,
   discountCode: discountCode.code,
+  branch: { id: branch.id, name: branch.name, address: branch.address, phone: branch.phone },
+}
+
+/** La sucursal solo se muestra con las sucursales activadas. */
+function withBranch<T extends { branch: DocumentSummary["branch"] }>(db: Db, rows: T[]): T[] {
+  return features(db).branches ? rows : rows.map((r) => ({ ...r, branch: null }))
 }
 
 export function isDocumentType(value: string): value is DocumentType {
@@ -88,22 +111,43 @@ export function listDocuments(
     to?: number | undefined
     /** Solo gastos de esta categoría. */
     expenseCategoryId?: string | undefined
+    /** Solo las ventas con factura que todavía no tienen sus números (y no se anularon). */
+    invoicePending?: boolean | undefined
+    /**
+     * Solo los de estas sucursales (por la ubicación de la que salen, o adonde llega un
+     * traslado); null, todas.
+     */
+    branchIds?: readonly string[] | null | undefined
     limit: number
   },
 ): DocumentSummary[] {
   const filters = [
+    opts.branchIds
+      ? or(
+          inBranches(document.locationId, opts.branchIds),
+          inBranches(document.toLocationId, opts.branchIds),
+        )
+      : undefined,
     opts.types?.length ? inArray(document.type, opts.types) : undefined,
     opts.from !== undefined ? gte(document.postedAt, opts.from) : undefined,
     opts.to !== undefined ? lt(document.postedAt, opts.to) : undefined,
     opts.expenseCategoryId ? eq(document.expenseCategoryId, opts.expenseCategoryId) : undefined,
+    opts.invoicePending
+      ? and(
+          eq(document.invoiceRequested, true),
+          isNull(fiscalInvoice.documentId),
+          isNull(reversal.id),
+        )
+      : undefined,
   ].filter((f) => f !== undefined)
-  return db
+  const rows = db
     .select(summaryColumns)
     .from(document)
     .leftJoin(reversal, eq(reversal.reversesDocumentId, document.id))
     .leftJoin(returned, eq(returned.id, document.returnsDocumentId))
     .leftJoin(user, eq(user.id, document.createdBy))
     .leftJoin(contact, eq(contact.id, document.contactId))
+    .leftJoin(fiscalInvoice, eq(fiscalInvoice.documentId, document.id))
     .leftJoin(expenseCategory, eq(expenseCategory.id, document.expenseCategoryId))
     .leftJoin(stockReason, eq(stockReason.id, document.stockReasonId))
     .innerJoin(terminal, eq(terminal.id, document.terminalId))
@@ -111,10 +155,12 @@ export function listDocuments(
     .leftJoin(destination, eq(destination.id, document.toLocationId))
     .leftJoin(tipUser, eq(tipUser.id, document.tipUserId))
     .leftJoin(discountCode, eq(discountCode.id, document.discountCodeId))
+    .leftJoin(branch, eq(branch.id, location.branchId))
     .where(filters.length ? and(...filters) : undefined)
     .orderBy(desc(document.postedAt), desc(document.id))
     .limit(opts.limit)
     .all()
+  return withBranch(db, rows)
 }
 
 /** Documento completo: líneas con nombre, pagos con su método y desglose de IVA e IGTF. */
@@ -132,6 +178,7 @@ export function getDocument(db: Db, id: string): DocumentDetail {
     .leftJoin(returned, eq(returned.id, document.returnsDocumentId))
     .leftJoin(user, eq(user.id, document.createdBy))
     .leftJoin(contact, eq(contact.id, document.contactId))
+    .leftJoin(fiscalInvoice, eq(fiscalInvoice.documentId, document.id))
     .leftJoin(expenseCategory, eq(expenseCategory.id, document.expenseCategoryId))
     .leftJoin(stockReason, eq(stockReason.id, document.stockReasonId))
     .innerJoin(terminal, eq(terminal.id, document.terminalId))
@@ -139,16 +186,18 @@ export function getDocument(db: Db, id: string): DocumentDetail {
     .leftJoin(destination, eq(destination.id, document.toLocationId))
     .leftJoin(tipUser, eq(tipUser.id, document.tipUserId))
     .leftJoin(discountCode, eq(discountCode.id, document.discountCodeId))
+    .leftJoin(branch, eq(branch.id, location.branchId))
     .where(eq(document.id, id))
     .get()
   if (!head) throw new HttpError(404, "NOT_FOUND", `No existe el documento ${id}`)
-  const { rateBase, rateQuote, rateValue, ...summary } = head
+  const [{ rateBase, rateQuote, rateValue, ...summary }] = withBranch(db, [head]) as [typeof head]
 
   const lines = db
     .select({
       lineNo: documentLine.lineNo,
       variantId: documentLine.variantId,
       name: variant.name,
+      unit: product.unit,
       qtyMilli: documentLine.qtyMilli,
       unitPriceMinor: documentLine.unitPriceMinor,
       discountMinor: documentLine.discountMinor,
@@ -160,6 +209,7 @@ export function getDocument(db: Db, id: string): DocumentDetail {
     })
     .from(documentLine)
     .innerJoin(variant, eq(variant.id, documentLine.variantId))
+    .innerJoin(product, eq(product.id, variant.productId))
     .where(eq(documentLine.documentId, id))
     .orderBy(asc(documentLine.lineNo))
     .all()

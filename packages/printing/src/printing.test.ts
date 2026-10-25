@@ -43,6 +43,9 @@ const sale: DocumentDetail = {
   contactId: "c1",
   contactName: "María Pérez",
   contactTaxId: "V-12345678",
+  contactAddress: null,
+  invoiceRequested: false,
+  invoice: null,
   externalRef: null,
   note: null,
   discountMinor: 0,
@@ -62,6 +65,7 @@ const sale: DocumentDetail = {
   toLocationId: null,
   toLocationName: null,
   discountCode: null,
+  branch: null,
   allocations: [],
   charges: [],
   rate: { base: "USD", quote: "VES", value: "877.90230000" },
@@ -71,6 +75,7 @@ const sale: DocumentDetail = {
       lineNo: 1,
       variantId: "v1",
       name: "Agua mineral 1,5 L",
+      unit: "unit",
       qtyMilli: 2000,
       unitPriceMinor: 101837,
       discountMinor: 0,
@@ -86,6 +91,7 @@ const sale: DocumentDetail = {
       lineNo: 2,
       variantId: "v2",
       name: "Harina PAN de maíz blanco precocida 1 kg (paquete)",
+      unit: "unit",
       qtyMilli: 1000,
       unitPriceMinor: 105348,
       discountMinor: 0,
@@ -379,6 +385,27 @@ describe("recibo", () => {
     expect(text).not.toContain("¡Gracias por su compra!")
   })
 
+  test("lo que se vende por kilo dice el peso y el precio por kilo", () => {
+    const first = sale.lines[0]
+    if (!first) throw new Error("el fixture no tiene líneas")
+    const cheese: DocumentDetail = {
+      ...sale,
+      lines: [
+        {
+          ...first,
+          name: "Queso blanco",
+          unit: "kg",
+          qtyMilli: 350,
+          unitPriceMinor: 43800,
+          lineTotalMinor: 15330,
+          modifiers: [],
+        },
+      ],
+    }
+    const text = toPlainText(receiptLines(cheese, business, 48), 48)
+    expect(text).toMatch(/0,350 kg × Bs 438,00\/kg\s+Bs 153,30/)
+  })
+
   test("la propina sale aparte del total, con para quién es", () => {
     const text = toPlainText(
       receiptLines({ ...sale, tipMinor: 30000, tipUserName: "Juan" }, business, 48),
@@ -386,6 +413,16 @@ describe("recibo", () => {
     )
     expect(text).toMatch(/Propina \(Juan\)\s+Bs 300,00/)
     expect(text).toMatch(/CON PROPINA\s+Bs 3\.452,93/)
+  })
+
+  test("lo de una sucursal lleva su nombre y, si los tiene, su dirección y su teléfono", () => {
+    const branch = { id: "b", name: "Centro", address: "Calle 5, Maracay", phone: null }
+    const text = toPlainText(receiptLines({ ...sale, branch }, business, 48), 48)
+    expect(text).toContain("Sucursal Centro")
+    expect(text).toContain("Calle 5, Maracay")
+    expect(text).not.toContain("Av. Bolívar")
+    expect(text).toContain("Tel. 0241-5550000")
+    expect(toPlainText(receiptLines(sale, business, 48), 48)).not.toContain("Sucursal")
   })
 
   test("el mensaje del pie es el del negocio", () => {

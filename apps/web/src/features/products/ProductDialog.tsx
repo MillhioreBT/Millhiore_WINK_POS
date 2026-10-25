@@ -1,5 +1,5 @@
-import type { CatalogItem, ProductDetail } from "@millhiore/contracts"
-import { priceInList } from "@millhiore/domain"
+import type { CatalogItem, ProductDetail, ProductUnit } from "@millhiore/contracts"
+import { PRODUCT_UNITS, priceInList } from "@millhiore/domain"
 import {
   Button,
   Dialog,
@@ -25,6 +25,7 @@ import {
   parseAmount,
   toInputAmount,
   toInputQty,
+  UNIT_NAMES,
 } from "../../lib/format"
 import {
   bootstrapQuery,
@@ -36,6 +37,7 @@ import {
 } from "../../lib/queries"
 import { useFeatures } from "../../lib/session"
 import { makeContext } from "../pos/compute"
+import { CatalogFields, type PhotoChange, savePhoto } from "./CatalogFields"
 import { adjustLabel } from "./PriceListsDialog"
 import { RecipeEditor, type RecipeRow, recipePayload, recipeRows } from "./RecipeEditor"
 import { VariantsEditor } from "./VariantsEditor"
@@ -118,7 +120,13 @@ function ProductForm({
     minStock: item?.minStockMilli == null ? "" : toInputQty(item.minStockMilli),
     active: detail?.active ?? item?.active ?? true,
     tracksLots: item?.tracksLots ?? false,
+    unit: item?.unit ?? ("unit" as ProductUnit),
+    plu: item?.plu ? String(item.plu) : "",
   }))
+  // Catálogo en línea: la foto se sube después de guardar el producto.
+  const [description, setDescription] = useState(detail?.description ?? "")
+  const [inCatalog, setInCatalog] = useState(detail?.inCatalog ?? true)
+  const [photo, setPhoto] = useState<PhotoChange>({ kind: "keep" })
   // Opciones y extras que se ofrecen al venderlo (término, queso extra), en su orden.
   const [groupIds, setGroupIds] = useState<string[]>(() => item?.modifierGroupIds ?? [])
   const modifierGroups = features.modifiers ? (boot?.modifierGroups ?? []) : []
@@ -215,6 +223,16 @@ function ProductForm({
       setErrors(listErrors)
       return
     }
+    const pluText = form.plu.trim()
+    const plu = pluText ? Number(pluText) : null
+    if (pluText && !/^\d{1,6}$/.test(pluText)) {
+      setErrors({ plu: "Solo números, hasta 6 dígitos" })
+      return
+    }
+    if (plu === 0) {
+      setErrors({ plu: "El código de la balanza va de 1 a 999999" })
+      return
+    }
     const recipeBody = features.recipes ? recipePayload(recipe) : null
     if (recipeBody && !recipeBody.ok) {
       toast.error(recipeBody.error)
@@ -222,6 +240,7 @@ function ProductForm({
     }
     const common = {
       name: form.name.trim(),
+      unit: form.unit,
       priceCurrency: form.currency,
       taxId: form.taxId || null,
       categoryId: form.categoryId || null,
@@ -230,6 +249,7 @@ function ProductForm({
       ...(listBody.length ? { listPrices: listBody } : {}),
       ...(features.modifiers ? { modifierGroupIds: groupIds } : {}),
       ...(recipeBody?.ok ? { recipe: recipeBody.items } : {}),
+      ...(features.catalog ? { description: description.trim() || null, inCatalog } : {}),
     }
     let body: Record<string, unknown>
     if (hasVariants) {
@@ -249,21 +269,33 @@ function ProductForm({
         priceMinor,
         barcode: form.barcode.trim() || null,
         ...(form.sku.trim() ? { sku: form.sku.trim() } : {}),
+        ...(features.scale ? { plu } : {}),
       }
     }
     setBusy(true)
     setErrors({})
     setErrorKey(null)
     try {
+      let productId: string
       if (item) {
         await api(`/api/products/${item.productId}`, {
           method: "PATCH",
           body: { ...body, active: form.active },
         })
-        toast.success("Producto guardado")
+        productId = item.productId
       } else {
-        await api("/api/products", { body: { ...body, priceMinor, kind: form.kind } })
-        toast.success(`${common.name} creado`)
+        const created = await api<CatalogItem>("/api/products", {
+          body: { ...body, priceMinor, kind: form.kind },
+        })
+        productId = created.productId
+      }
+      try {
+        await savePhoto(productId, photo)
+        toast.success(item ? "Producto guardado" : `${common.name} creado`)
+      } catch (err) {
+        toast.error(
+          `${item ? "Producto guardado" : `${common.name} creado`}, pero la foto no: ${errorMessage(err)}`,
+        )
       }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["products"] }),
@@ -293,7 +325,7 @@ function ProductForm({
         </Field>
         <div className="grid grid-cols-[1fr_auto] gap-3">
           <Field
-            label="Precio de venta"
+            label={form.unit === "unit" ? "Precio de venta" : `Precio de venta (por ${form.unit})`}
             htmlFor="p-price"
             hint={hasVariants ? "El de las combinaciones sin precio propio" : undefined}
             error={errors.price ?? errors.priceMinor}
@@ -397,6 +429,23 @@ function ProductForm({
               </NativeSelect>
             </Field>
           )}
+          <Field
+            label="Se vende por"
+            htmlFor="p-unit"
+            hint={
+              form.unit === "unit"
+                ? "Por kilo, litro o metro se vende con decimales"
+                : `Se vende con decimales (0,350 ${form.unit}) y el precio es por ${form.unit}`
+            }
+          >
+            <NativeSelect id="p-unit" value={form.unit} onChange={set("unit")}>
+              {PRODUCT_UNITS.map((u) => (
+                <option key={u} value={u}>
+                  {UNIT_NAMES[u]}
+                </option>
+              ))}
+            </NativeSelect>
+          </Field>
         </div>
         <Field
           label="Categoría"
@@ -417,6 +466,19 @@ function ProductForm({
               ))}
           </NativeSelect>
         </Field>
+
+        {features.catalog ? (
+          <CatalogFields
+            productId={item?.productId ?? null}
+            imageVersion={detail?.imageVersion ?? null}
+            photo={photo}
+            onPhoto={setPhoto}
+            description={description}
+            onDescription={setDescription}
+            inCatalog={inCatalog}
+            onInCatalog={setInCatalog}
+          />
+        ) : null}
 
         {features.recipes ? (
           <RecipeEditor
@@ -542,6 +604,23 @@ function ProductForm({
             >
               <Input id="p-sku" value={form.sku} onChange={set("sku")} placeholder="Opcional" />
             </Field>
+            {features.scale ? (
+              <Field
+                label="Código en la balanza (PLU)"
+                htmlFor="p-plu"
+                hint="El número con que está en la balanza: sus etiquetas lo traen con el peso o el precio"
+                error={errors.plu}
+              >
+                <Input
+                  id="p-plu"
+                  inputMode="numeric"
+                  value={form.plu}
+                  onChange={set("plu")}
+                  placeholder="Opcional"
+                  className="tabular"
+                />
+              </Field>
+            ) : null}
           </div>
         )}
         {tracksStock ? (

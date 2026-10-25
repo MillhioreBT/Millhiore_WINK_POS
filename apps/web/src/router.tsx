@@ -18,7 +18,9 @@ import { InventoryPage } from "./features/inventory/InventoryPage"
 import { ProductionPage } from "./features/inventory/ProductionPage"
 import { TransfersPage } from "./features/inventory/TransfersPage"
 import { KitchenPage } from "./features/kitchen/KitchenPage"
+import { OrdersPage } from "./features/orders/OrdersPage"
 import { PayablesPage } from "./features/payables/PayablesPage"
+import { PluginPage } from "./features/plugins/PluginPage"
 import { PosPage } from "./features/pos/PosPage"
 import { ProductsPage } from "./features/products/ProductsPage"
 import { PurchasesPage } from "./features/purchases/PurchasesPage"
@@ -132,6 +134,19 @@ const salesRoute = createRoute({
   path: "/ventas",
   component: SalesPage,
 })
+const pluginRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/plugin/$pluginId",
+  component: function PluginRoute() {
+    const { pluginId } = pluginRoute.useParams()
+    return <PluginPage key={pluginId} pluginId={pluginId} />
+  },
+})
+const ordersRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/pedidos",
+  component: OrdersPage,
+})
 const quotesRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/cotizaciones",
@@ -219,6 +234,8 @@ const routeTree = rootRoute.addChildren([
     productsRoute,
     salesRoute,
     quotesRoute,
+    ordersRoute,
+    pluginRoute,
     receivablesRoute,
     purchasesRoute,
     expensesRoute,

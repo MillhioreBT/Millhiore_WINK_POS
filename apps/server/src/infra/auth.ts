@@ -7,7 +7,8 @@ export interface AuthOptions {
   secret: string
   /** URL pública del servidor, p. ej. http://localhost:3000 */
   baseURL: string
-  trustedOrigins?: string[]
+  /** Fijos, o calculados en cada petición (la dirección de Tailscale aparece sin reiniciar). */
+  trustedOrigins?: string[] | (() => string[])
   /** Límite de intentos de login. Se apaga en pruebas. */
   rateLimit?: boolean
 }
@@ -38,10 +39,13 @@ export const PUBLIC_AUTH_PATHS = [
  * está cerrado: los usuarios solo los crea el servidor (asistente inicial o administrador).
  */
 export function createAuth(db: Db, opts: AuthOptions) {
+  const origins = opts.trustedOrigins
   return betterAuth({
     secret: opts.secret,
     baseURL: opts.baseURL,
-    ...(opts.trustedOrigins ? { trustedOrigins: opts.trustedOrigins } : {}),
+    ...(origins
+      ? { trustedOrigins: typeof origins === "function" ? async () => origins() : origins }
+      : {}),
     database: drizzleAdapter(db, {
       provider: "sqlite",
       schema: { user, session, auth_account: authAccount, verification },

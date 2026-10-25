@@ -36,8 +36,16 @@ import {
 } from "lucide-react"
 import { Fragment, useMemo, useState } from "react"
 import { ScanButton } from "../../components/CameraScanner"
+import { CentralNotice } from "../../components/CentralNotice"
 import { ImportDialog } from "../../components/ImportDialog"
-import { formatDate, formatMoney, formatPercent, formatQty } from "../../lib/format"
+import {
+  formatDate,
+  formatMoney,
+  formatPercent,
+  formatQty,
+  formatQtyUnit,
+  perUnit,
+} from "../../lib/format"
 import { productImport } from "../../lib/importConfigs"
 import { stockAt, useLocations } from "../../lib/locations"
 import { bootstrapQuery, categoriesQuery, productsQuery, rateStatusQuery } from "../../lib/queries"
@@ -124,11 +132,17 @@ export function ProductsPage() {
     !p.tracksStock ? (
       "—"
     ) : p.stockMilli > 0 && p.minStockMilli !== null && p.stockMilli <= p.minStockMilli ? (
-      <Badge variant="warning" className="tabular" title={`Mínimo ${formatQty(p.minStockMilli)}`}>
-        {formatQty(p.stockMilli)}
+      <Badge
+        variant="warning"
+        className="tabular"
+        title={`Mínimo ${formatQtyUnit(p.minStockMilli, p.unit)}`}
+      >
+        {formatQtyUnit(p.stockMilli, p.unit)}
       </Badge>
     ) : (
-      <span className={p.stockMilli <= 0 ? "text-destructive" : ""}>{formatQty(p.stockMilli)}</span>
+      <span className={p.stockMilli <= 0 ? "text-destructive" : ""}>
+        {formatQtyUnit(p.stockMilli, p.unit)}
+      </span>
     )
 
   /** Un producto con tallas y colores: su nombre, el rango de precios y la existencia de todas. */
@@ -241,6 +255,9 @@ export function ProductsPage() {
         </TableCell>
         <TableCell className="tabular text-right">
           {formatMoney(p.priceMinor, p.priceCurrency)}
+          {p.unit !== "unit" ? (
+            <span className="text-muted-foreground text-xs">{perUnit(p.unit)}</span>
+          ) : null}
           {inDoc !== null && ctx && p.priceCurrency !== ctx.docCurrency ? (
             <span className="block text-muted-foreground text-xs md:hidden">
               {formatMoney(inDoc, ctx.docCurrency)}
@@ -309,6 +326,7 @@ export function ProductsPage() {
 
   return (
     <div className="grid grid-cols-1 gap-4">
+      <CentralNotice what="el catálogo (productos, precios, categorías y descuentos)" />
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="font-semibold text-xl">Productos</h1>
         <div className="relative ml-auto w-full sm:w-72">

@@ -20,6 +20,7 @@ import {
   type PriceListRule,
   planCharges,
   priceInList,
+  qtyForAmount,
   roundToInteger,
   type SurchargeGroup,
   settle,
@@ -480,6 +481,22 @@ export function draftCharges(
     })
   }
   return { charges, missingRate }
+}
+
+/**
+ * Cuánto lleva un monto (en bolívares o en la moneda de referencia) al precio por unidad del
+ * ticket, en milésimas; null si no se puede convertir o el monto no alcanza para nada.
+ */
+export function qtyForMoney(
+  ctx: PosContext,
+  amount: { minor: number; currency: string },
+  unitPriceMinor: number | null,
+): number | null {
+  if (unitPriceMinor === null) return null
+  const inDoc = convertMinor(ctx, amount.minor, amount.currency, ctx.docCurrency)
+  if (inDoc === null) return null
+  const qty = qtyForAmount(inDoc, unitPriceMinor)
+  return qty && qty > 0 ? qty : null
 }
 
 /** Línea del ticket tal como se guarda en la caja: precio de catálogo y descuento elegido. */

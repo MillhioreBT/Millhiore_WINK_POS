@@ -62,6 +62,9 @@ describe("etiquetas", () => {
     expect(priceText(ctx, item({ priceMinor: 3650, priceCurrency: "VES" }), "own")).toBe("Bs 36,50")
     expect(priceText(ctx, pan, "none")).toBeNull()
     expect(priceText({ ...ctx, rate: null }, pan, "legal")).toBeNull()
+    // Lo que se vende por kilo lleva el precio por kilo.
+    const queso = item({ priceMinor: 1200, priceCurrency: "USD", unit: "kg" })
+    expect(priceText(ctx, queso, "both")).toBe("$ 12,00/kg · Bs 438,00/kg")
   })
 
   test("cada producto tantas veces como se pidió, después de los huecos de la hoja", () => {

@@ -13,7 +13,11 @@ import {
 import { uuidv7 } from "@millhiore/domain"
 import { eq } from "drizzle-orm"
 import { createApp } from "../app"
+import type { AppDeps } from "../http/context"
 import { createAuth } from "../infra/auth"
+import { PluginManager } from "../modules/plugins/manager"
+import type { SandboxLimits } from "../modules/plugins/sandbox"
+import { SyncClient } from "../modules/sync/client"
 
 export const BASE = "http://localhost:3000"
 export const NOW = 1_760_000_000_000
@@ -25,6 +29,8 @@ export interface Harness {
     init?: {
       method?: string
       body?: unknown
+      /** Cuerpo tal cual (una foto), con su `content-type` en `headers`. */
+      raw?: Uint8Array
       cookie?: string
       /** Dirección del cliente tal como la vería el servidor Bun. */
       ip?: string
@@ -34,6 +40,12 @@ export interface Harness {
   login: (username: string, password: string) => Promise<string>
   /** Reloj del servidor: se puede adelantar en las pruebas. */
   clock: { now: number }
+  /** Los plugins (si se pidieron al crear el arnés). */
+  plugins: PluginManager | null
+  /** La sincronización con un central (con el `fetch` que se pasó). */
+  sync: SyncClient
+  /** Para que otro arnés hable con este (como si fuera por la red). */
+  fetch: typeof fetch
 }
 
 export function harness(
@@ -42,6 +54,14 @@ export function harness(
     rates?: { sources?: RateSource[]; fetcher?: typeof fetch }
     afterSetup?: () => void
     backups?: { dataDir: string; keep: number }
+    telegram?: { fetcher?: typeof fetch }
+    network?: AppDeps["network"]
+    remote?: AppDeps["remote"]
+    webRoot?: string
+    /** Carga los plugins de verdad (QuickJS), con su `fetch` y sus límites inyectables. */
+    plugins?: { fetcher?: typeof fetch; limits?: SandboxLimits }
+    /** El `fetch` con que una sucursal llega a su central (en las pruebas, el `fetch` de otro arnés). */
+    sync?: { fetcher?: typeof fetch }
   } = {},
 ): Harness {
   const db = createDb(":memory:")
@@ -52,20 +72,38 @@ export function harness(
     rateLimit: opts.rateLimit ?? false,
   })
   const clock = { now: NOW }
+  const plugins = opts.plugins
+    ? new PluginManager(db, {
+        now: () => clock.now,
+        ...(opts.plugins.fetcher ? { fetcher: opts.plugins.fetcher } : {}),
+        ...(opts.plugins.limits ? { limits: opts.plugins.limits } : {}),
+      })
+    : null
+  const sync = new SyncClient(db, {
+    now: () => clock.now,
+    ...(opts.sync?.fetcher ? { fetcher: opts.sync.fetcher } : {}),
+  })
   const app = createApp({
     db,
     auth,
+    sync,
     now: () => clock.now,
     ...(opts.rates ? { rates: opts.rates } : {}),
     ...(opts.afterSetup ? { afterSetup: opts.afterSetup } : {}),
     ...(opts.backups ? { backups: opts.backups } : {}),
+    ...(opts.telegram ? { telegram: opts.telegram } : {}),
+    ...(opts.network ? { network: opts.network } : {}),
+    ...(opts.remote ? { remote: opts.remote } : {}),
+    ...(opts.webRoot ? { webRoot: opts.webRoot } : {}),
+    ...(plugins ? { plugins } : {}),
   })
+  plugins?.setApp((req) => app.request(req))
 
   const call: Harness["call"] = async (path, init = {}) =>
     await app.request(
       path,
       {
-        method: init.method ?? (init.body ? "POST" : "GET"),
+        method: init.method ?? (init.body || init.raw ? "POST" : "GET"),
         headers: {
           origin: BASE,
           ...(init.body ? { "content-type": "application/json" } : {}),
@@ -73,6 +111,7 @@ export function harness(
           ...init.headers,
         },
         ...(init.body ? { body: JSON.stringify(init.body) } : {}),
+        ...(init.raw ? { body: init.raw } : {}),
       },
       // Lo que Bun pasa como 2.º argumento de fetch: de ahí sale la IP del socket.
       init.ip
@@ -88,7 +127,12 @@ export function harness(
       .map((c) => c.split(";")[0])
       .join("; ")
   }
-  return { db, call, login, clock }
+  const fetchApp = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input))
+    const { signal: _signal, ...rest } = init ?? {}
+    return await app.request(`${url.pathname}${url.search}`, rest)
+  }) as typeof fetch
+  return { db, call, login, clock, plugins, sync, fetch: fetchApp }
 }
 
 export const setupBody = {

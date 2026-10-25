@@ -7,12 +7,12 @@ import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } 
 import { toast } from "sonner"
 import { ScanButton } from "../../components/CameraScanner"
 import { groupByProduct } from "../../components/VariantGrid"
-import { formatMoney, formatQty } from "../../lib/format"
+import { formatMoney, formatQty, perUnit } from "../../lib/format"
 import { stockAt } from "../../lib/locations"
-import { categoriesQuery } from "../../lib/queries"
-import { findByCode } from "../../lib/scanner"
+import { bootstrapQuery, categoriesQuery } from "../../lib/queries"
+import { type CodeMatch, matchCode } from "../../lib/scanner"
 import { can, useMe } from "../../lib/session"
-import { type PosContext, priceWithList, unitPriceInDoc } from "./compute"
+import { type PosContext, priceWithList, qtyForMoney, unitPriceInDoc } from "./compute"
 import { VariantPickerDialog } from "./VariantPickerDialog"
 
 /**
@@ -48,7 +48,8 @@ export function CatalogPanel({
   priceListId: string | null
   /** De dónde se vende: la existencia que muestran las tarjetas. */
   locationId: string
-  onAdd: (item: CatalogItem) => void
+  /** Con `qtyMilli` ya se sabe cuánto (la etiqueta de la balanza trae el peso o el precio). */
+  onAdd: (item: CatalogItem, qtyMilli?: number) => void
   /** Hay un diálogo abierto: el lector USB no agrega nada. */
   paused: boolean
   searchRef?: RefObject<HTMLInputElement | null>
@@ -114,10 +115,34 @@ export function CatalogPanel({
     return groupByProduct(filtered).map((g) => (g[0]?.options ? (all.get(g[0].productId) ?? g) : g))
   }, [products, filtered])
 
-  const add = (item: CatalogItem) => {
-    onAdd(item)
+  const add = (item: CatalogItem, qtyMilli?: number) => {
+    onAdd(item, qtyMilli)
     setSearch("")
     if (finePointer) searchRef.current?.focus()
+  }
+
+  // Las etiquetas de la balanza traen el producto con su peso o su precio.
+  const boot = useQuery(bootstrapQuery)
+  const scale = boot.data?.features.scale ? boot.data.scale : null
+  const byCode = (code: string): CodeMatch | undefined => matchCode(products ?? [], code, scale)
+  /** Agrega lo leído; false si no hay producto con ese código. */
+  const addCode = (code: string): boolean => {
+    const m = byCode(code)
+    if (!m) return false
+    if (m.priceMinor !== undefined && scale) {
+      const price = priceWithList(ctx, priceListId, m.item.variantId, m.item)
+      const qty = qtyForMoney(
+        ctx,
+        { minor: m.priceMinor, currency: scale.priceCurrency },
+        unitPriceInDoc(ctx, price.priceMinor, price.priceCurrency),
+      )
+      if (qty === null) {
+        toast.error(`No se pudo calcular cuánto lleva la etiqueta de ${m.item.name}`)
+        return true
+      }
+      add(m.item, qty)
+    } else add(m.item, m.weightMilli)
+    return true
   }
 
   // F2 busca.
@@ -146,11 +171,7 @@ export function CatalogPanel({
         if (s.code.length >= 4 && now - s.last < 100) {
           e.preventDefault()
           const code = s.code
-          const item = products?.find(
-            (p) => p.barcode === code || p.sku.toLowerCase() === code.toLowerCase(),
-          )
-          if (item) add(item)
-          else toast.error(`No hay ningún producto con el código ${code}`)
+          if (!addCode(code)) toast.error(`No hay ningún producto con el código ${code}`)
         }
         s.code = ""
         return
@@ -170,13 +191,7 @@ export function CatalogPanel({
     if (e.key !== "Enter") return
     const term = search.trim()
     if (!term) return
-    const exact = products?.find(
-      (p) => p.barcode === term || p.sku.toLowerCase() === term.toLowerCase(),
-    )
-    if (exact) {
-      add(exact)
-      return
-    }
+    if (addCode(term)) return
     const only = cards.length === 1 ? cards[0] : undefined
     if (only?.[0]?.options) setPicking(only)
     else if (only?.[0]) add(only[0])
@@ -204,13 +219,12 @@ export function CatalogPanel({
           continuous
           className="absolute top-1/2 right-1.5 size-9 -translate-y-1/2 border-0 shadow-none"
           onCode={(code) => {
-            const item = findByCode(products ?? [], code)
-            if (!item) {
+            const m = byCode(code)
+            if (!m || !addCode(code)) {
               toast.error(`No hay ningún producto con el código ${code}`)
               return
             }
-            add(item)
-            toast.success(`${item.name} agregado`)
+            toast.success(`${m.item.name} agregado`)
           }}
         />
       </div>
@@ -285,22 +299,29 @@ export function CatalogPanel({
                     </span>
                   ) : null}
                 </span>
-                <span className="flex items-end justify-between gap-2">
+                <span className="flex flex-wrap items-end justify-between gap-x-2 gap-y-1">
                   <span className="grid">
-                    <span className="tabular font-semibold">
+                    <span className="tabular whitespace-nowrap font-semibold">
                       {varies ? <span className="font-normal text-xs">desde </span> : null}
                       {unit === null ? "—" : formatMoney(unit, doc)}
+                      {unit === null ? null : (
+                        <span className="font-normal text-muted-foreground text-xs">
+                          {perUnit(p.unit)}
+                        </span>
+                      )}
                     </span>
                     {price.priceCurrency !== doc ? (
                       <span className="tabular text-muted-foreground text-xs">
                         {formatMoney(price.priceMinor, price.priceCurrency)}
+                        {perUnit(p.unit)}
                       </span>
                     ) : null}
                   </span>
                   {p.tracksStock ? (
                     // La caja vende de su ubicación: muestra lo que hay ahí.
                     <Badge variant={stock > 0 ? "secondary" : "warning"} className="tabular">
-                      {formatQty(stock)}
+                      {/* Corto en la tarjeta: «12,35 kg», sin los ceros de los gramos. */}
+                      {p.unit === "unit" ? formatQty(stock) : `${formatQty(stock)} ${p.unit}`}
                     </Badge>
                   ) : null}
                 </span>

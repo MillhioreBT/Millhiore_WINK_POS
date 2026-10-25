@@ -92,6 +92,19 @@ export const document = sqliteTable(
     tipLegalMinor: integer("tip_legal_minor").notNull().default(0),
     /** Para quién es la propina (un usuario); null = para todo el equipo. */
     tipUserId: text("tip_user_id"),
+    /**
+     * Los datos fiscales del cliente (o proveedor) tal como eran al registrarse: nombre o razón
+     * social, cédula o RIF y dirección. Cambiar el contacto después no cambia el documento.
+     */
+    customerName: text("customer_name"),
+    customerTaxId: text("customer_tax_id"),
+    customerAddress: text("customer_address"),
+    /**
+     * Venta con factura (no solo nota de venta): exige el nombre y la cédula o el RIF del cliente.
+     * La factura la emite el medio autorizado (máquina fiscal, forma libre o, desde 2027, el medio
+     * digital del SENIAT) y sus números se anotan en `fiscal_invoice`.
+     */
+    invoiceRequested: integer("invoice_requested", { mode: "boolean" }).notNull().default(false),
     note: text("note"),
     createdBy: text("created_by"),
     postedAt: integer("posted_at").notNull(),

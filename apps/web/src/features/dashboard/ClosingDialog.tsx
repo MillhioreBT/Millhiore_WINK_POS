@@ -5,17 +5,29 @@ import { bootstrapQuery, payablesQuery, receivablesQuery } from "../../lib/queri
 import { can, useMe } from "../../lib/session"
 import { closingText } from "./closingText"
 
-/** El cierre del día como texto: se copia o se manda directo por WhatsApp. */
-export function ClosingDialog({ summary, onClose }: { summary: DaySummary; onClose: () => void }) {
+/**
+ * El cierre del día como texto: se copia o se manda directo por WhatsApp. El de una sucursal no
+ * lleva lo que deben los clientes ni lo que se debe (es de todo el negocio).
+ */
+export function ClosingDialog({
+  summary,
+  branchName,
+  onClose,
+}: {
+  summary: DaySummary
+  branchName?: string | undefined
+  onClose: () => void
+}) {
   const me = useMe()
   const boot = useQuery(bootstrapQuery)
-  const sees = can(me, "payment.receive", "finance.view")
+  const sees = !branchName && can(me, "payment.receive", "finance.view")
   const owed = useQuery({ ...receivablesQuery, enabled: sees })
-  const seesPayables = can(me, "payable.manage", "finance.view")
+  const seesPayables = !branchName && can(me, "payable.manage", "finance.view")
   const owing = useQuery({ ...payablesQuery, enabled: seesPayables })
+  const name = boot.data?.business.name ?? "Mi negocio"
   const text = closingText(
     summary,
-    { name: boot.data?.business.name ?? "Mi negocio" },
+    { name: branchName ? `${name} · ${branchName}` : name },
     sees ? (owed.data ?? null) : null,
     seesPayables ? (owing.data ?? null) : null,
   )

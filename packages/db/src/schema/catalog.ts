@@ -1,6 +1,6 @@
-import { type ProductOption, TAX_KINDS } from "@millhiore/domain"
+import { PRODUCT_UNITS, type ProductOption, TAX_KINDS } from "@millhiore/domain"
 import { sql } from "drizzle-orm"
-import { check, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core"
+import { blob, check, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core"
 import { currency } from "./core"
 
 /**
@@ -50,6 +50,11 @@ export const product = sqliteTable(
      * se reparten solas, primero el que vence antes. Solo en productos con existencia.
      */
     tracksLots: integer("tracks_lots", { mode: "boolean" }).notNull().default(false),
+    /**
+     * Por unidad o por kilo, litro o metro: con estos se vende con decimales (0,350 kg) y el
+     * precio es por kilo, litro o metro.
+     */
+    unit: text("unit", { enum: PRODUCT_UNITS }).notNull().default("unit"),
     /** IVA del producto; null = el impuesto por defecto del negocio. */
     taxId: text("tax_id").references(() => tax.id),
     /** Categoría del producto; null = sin categoría. */
@@ -59,11 +64,28 @@ export const product = sqliteTable(
      * vende de una sola forma. Cada combinación es una variante con su código y su existencia.
      */
     options: text("options", { mode: "json" }).$type<ProductOption[]>(),
+    /** Para el catálogo en línea: de qué es, cuánto trae («Queso llanero duro, por kilo»). */
+    description: text("description"),
+    /** Sale en el catálogo en línea (si su categoría también sale). */
+    inCatalog: integer("in_catalog", { mode: "boolean" }).notNull().default(true),
     active: integer("active", { mode: "boolean" }).notNull().default(true),
     createdAt: integer("created_at").notNull(),
   },
   (t) => [check("product_service_no_stock", sql`${t.kind} = 'good' or ${t.tracksStock} = 0`)],
 )
+
+/**
+ * La foto del producto (JPEG, PNG o WebP ya achicada en el navegador). Va en la base para que los
+ * respaldos la lleven; `updatedAt` cambia con cada foto nueva y sirve de versión en su dirección.
+ */
+export const productImage = sqliteTable("product_image", {
+  productId: text("product_id")
+    .primaryKey()
+    .references(() => product.id, { onDelete: "cascade" }),
+  mime: text("mime", { enum: ["image/jpeg", "image/png", "image/webp"] }).notNull(),
+  data: blob("data", { mode: "buffer" }).notNull(),
+  updatedAt: integer("updated_at").notNull(),
+})
 
 /**
  * Por qué cambia la existencia sin una compra ni una venta: merma, vencido, uso interno, sobrante
@@ -88,6 +110,11 @@ export const variant = sqliteTable(
       .references(() => product.id),
     sku: text("sku").notNull().unique(),
     barcode: text("barcode").unique(),
+    /**
+     * Código del producto en la balanza que imprime etiquetas (PLU): la etiqueta lo trae con el
+     * peso o el precio. null si no se pesa en una balanza.
+     */
+    plu: integer("plu").unique(),
     /** El del producto con los valores de la combinación: «Camisa (M, Azul)». */
     name: text("name").notNull(),
     /** Un valor por cada característica del producto, en su orden; null si no tiene. */

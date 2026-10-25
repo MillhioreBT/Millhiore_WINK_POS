@@ -1,0 +1,12 @@
+{
+  "id": "ventas-del-dia",
+  "name": "Ventas del día",
+  "version": "1.0.0",
+  "description": "Cuenta las ventas desde que se instaló y muestra el total del día. Ejemplo de plugin.",
+  "author": "Millhiore WINK POS",
+  "permissions": ["report.view"],
+  "events": ["sale.posted"],
+  "network": [],
+  "server": "server.js",
+  "page": { "title": "Ventas del día", "entry": "index.html" }
+}

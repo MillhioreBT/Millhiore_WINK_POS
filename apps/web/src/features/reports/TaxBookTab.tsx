@@ -66,7 +66,7 @@ export function TaxBookTab({
       bold("Concepto"),
       bold(who),
       bold("Cédula o RIF"),
-      ...(sales ? [] : [bold("Factura")]),
+      ...(sales ? [bold("Factura"), bold("N.º de control")] : [bold("Factura")]),
       bold(`Total (${r.legalCurrency})`),
       ...r.rates.flatMap((x) =>
         x.kind === "taxed"
@@ -93,7 +93,7 @@ export function TaxBookTab({
           26,
           28,
           15,
-          ...(sales ? [] : [14]),
+          ...(sales ? [12, 14] : [14]),
           16,
           ...r.rates.flatMap(() => [14, 14]),
         ],
@@ -109,7 +109,9 @@ export function TaxBookTab({
             concept(row),
             row.contactName ?? (sales ? "Consumidor final" : ""),
             row.contactTaxId ?? "",
-            ...(sales ? [] : [row.externalRef ?? ""]),
+            ...(sales
+              ? [row.invoiceNumber ?? "", row.controlNumber ?? ""]
+              : [row.externalRef ?? ""]),
             moneyCell(row.totalLegalMinor),
             ...amounts(row),
           ]),
@@ -119,7 +121,7 @@ export function TaxBookTab({
             "",
             "",
             "",
-            ...(sales ? [] : [""]),
+            ...(sales ? ["", ""] : [""]),
             moneyCell(r.totals.totalLegalMinor, 2, true),
             ...amounts(r.totals),
           ],
@@ -240,6 +242,9 @@ export function TaxBookTab({
                           <span className="block text-muted-foreground text-xs">
                             {date(row.postedAt)} · {concept(row)}
                             {row.externalRef ? ` · factura ${row.externalRef}` : ""}
+                            {row.controlNumber
+                              ? ` · factura ${row.invoiceNumber} · control ${row.controlNumber}`
+                              : ""}
                           </span>
                           <span className="block text-muted-foreground text-xs md:hidden">
                             {row.contactName ?? (sales ? "Consumidor final" : "—")}

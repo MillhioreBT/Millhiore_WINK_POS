@@ -1,6 +1,7 @@
 import type { SetupBody } from "@millhiore/contracts"
 import {
   account,
+  branch,
   business,
   currency,
   type Db,
@@ -19,6 +20,7 @@ import { exchangeRate as makeRate, passwordProblem, uuidv7 } from "@millhiore/do
 import { eq } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
 import type { Auth } from "../../infra/auth"
+import { MAIN_BRANCH_ID } from "../branches/service"
 import { writeBusinessProfile, writeFiscalSettings } from "../settings/service"
 import { createUserAccount } from "../users/service"
 
@@ -105,9 +107,19 @@ export async function runSetup(
             createdAt: now,
           })
           .run()
+        tx.insert(branch)
+          .values({ id: MAIN_BRANCH_ID, name: "Principal", createdAt: now })
+          .onConflictDoNothing()
+          .run()
         const locationId = uuidv7(now)
         tx.insert(location)
-          .values({ id: locationId, businessId, name: input.locationName, kind: "store" })
+          .values({
+            id: locationId,
+            businessId,
+            branchId: MAIN_BRANCH_ID,
+            name: input.locationName,
+            kind: "store",
+          })
           .run()
         tx.insert(terminal)
           .values({

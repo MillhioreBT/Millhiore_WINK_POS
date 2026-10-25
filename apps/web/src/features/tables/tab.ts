@@ -88,13 +88,14 @@ export function addToDraft(
   draft: readonly DraftLine[],
   item: CatalogItem,
   extras?: LineExtras,
+  qtyMilli = 1000,
 ): DraftLine[] {
   const plain = !extras?.modifiers.length && !extras?.note
   const same = plain
     ? draft.find((l) => l.variantId === item.variantId && !l.note && !l.modifiers.length)
     : undefined
   if (same) {
-    return draft.map((l) => (l === same ? { ...l, qtyMilli: l.qtyMilli + 1000 } : l))
+    return draft.map((l) => (l === same ? { ...l, qtyMilli: l.qtyMilli + qtyMilli } : l))
   }
   return [
     ...draft,
@@ -102,7 +103,7 @@ export function addToDraft(
       id: uuidv7(),
       variantId: item.variantId,
       name: item.name,
-      qtyMilli: 1000,
+      qtyMilli,
       priceMinor: item.priceMinor,
       priceCurrency: item.priceCurrency,
       taxId: item.taxId,
@@ -115,7 +116,7 @@ export function addToDraft(
 interface DraftState {
   /** El pedido en curso de cada cuenta (sobrevive a una recarga o a cambiar de pantalla). */
   drafts: Record<string, DraftLine[]>
-  add: (tabId: string, item: CatalogItem, extras?: LineExtras) => void
+  add: (tabId: string, item: CatalogItem, extras?: LineExtras, qtyMilli?: number) => void
   setQty: (tabId: string, lineId: string, qtyMilli: number) => void
   setNote: (tabId: string, lineId: string, note: string | null) => void
   clear: (tabId: string) => void
@@ -125,9 +126,12 @@ export const useDrafts = create<DraftState>()(
   persist(
     (set) => ({
       drafts: {},
-      add: (tabId, item, extras) =>
+      add: (tabId, item, extras, qtyMilli) =>
         set((s) => ({
-          drafts: { ...s.drafts, [tabId]: addToDraft(s.drafts[tabId] ?? [], item, extras) },
+          drafts: {
+            ...s.drafts,
+            [tabId]: addToDraft(s.drafts[tabId] ?? [], item, extras, qtyMilli),
+          },
         })),
       setQty: (tabId, lineId, qtyMilli) =>
         set((s) => ({

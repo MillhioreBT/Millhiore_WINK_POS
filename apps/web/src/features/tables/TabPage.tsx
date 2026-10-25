@@ -41,9 +41,11 @@ import {
   convertMinor,
   makeContext,
   type PosContext,
+  unitPriceInDoc,
   unitWithModifiers,
 } from "../pos/compute"
 import { ModifierDialog, modifiersText } from "../pos/ModifierDialog"
+import { QuantityDialog } from "../pos/QuantityDialog"
 import { usePos } from "../pos/store"
 import {
   BillDialog,
@@ -70,6 +72,7 @@ type Dialog =
   | { kind: "void"; line: TabLine }
   | { kind: "note"; line: DraftLine }
   | { kind: "modifiers"; item: CatalogItem }
+  | { kind: "qty"; item: CatalogItem }
 
 /**
  * La cuenta de una mesa: el catálogo para armar el pedido, lo que ya se pidió y lo que falta por
@@ -176,10 +179,12 @@ export function TabPage({ tabId }: { tabId: string }) {
           products={products.data}
           priceListId={null}
           locationId={terminal.locationId}
-          onAdd={(item) =>
+          onAdd={(item, qtyMilli) =>
             features.modifiers && item.modifierGroupIds.length
               ? setDialog({ kind: "modifiers", item })
-              : add(t.id, item)
+              : qtyMilli === undefined && item.unit !== "unit"
+                ? setDialog({ kind: "qty", item })
+                : add(t.id, item, undefined, qtyMilli)
           }
           paused={dialog !== null}
         />
@@ -435,6 +440,18 @@ export function TabPage({ tabId }: { tabId: string }) {
       ) : null}
       {dialog?.kind === "void" ? (
         <VoidLineDialog tab={t} line={dialog.line} onClose={() => setDialog(null)} />
+      ) : null}
+      {dialog?.kind === "qty" ? (
+        <QuantityDialog
+          item={dialog.item}
+          ctx={ctx}
+          unitPriceMinor={unitPriceInDoc(ctx, dialog.item.priceMinor, dialog.item.priceCurrency)}
+          onClose={() => setDialog(null)}
+          onConfirm={(qtyMilli) => {
+            add(t.id, dialog.item, undefined, qtyMilli)
+            setDialog(null)
+          }}
+        />
       ) : null}
       {dialog?.kind === "modifiers" && boot.data ? (
         <ModifierDialog

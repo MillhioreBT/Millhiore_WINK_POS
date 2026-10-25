@@ -1,4 +1,4 @@
-import type { Features, Me } from "@millhiore/contracts"
+import type { Bootstrap, Features, Me } from "@millhiore/contracts"
 import { useQuery } from "@tanstack/react-query"
 import { api } from "./api"
 import { bootstrapQuery, meQuery, queryClient } from "./queries"
@@ -24,12 +24,21 @@ const ALL_FEATURES: Features = {
   kitchen: false,
   recipes: false,
   tips: false,
+  scale: false,
+  branches: false,
+  catalog: false,
 }
 
 /** Las funciones que usa el comercio; mientras carga, las de siempre (como antes de poder apagarlas). */
 export function useFeatures(): Features {
   const { data } = useQuery(bootstrapQuery)
   return data?.features ?? ALL_FEATURES
+}
+
+/** Si esta PC es una sucursal con servidor propio: su central (null si no). */
+export function useCentral(): Bootstrap["central"] {
+  const { data } = useQuery(bootstrapQuery)
+  return data?.central ?? null
 }
 
 export function can(me: Me, ...permissions: string[]): boolean {

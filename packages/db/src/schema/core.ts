@@ -28,11 +28,31 @@ export const business = sqliteTable("business", {
   createdAt: integer("created_at").notNull(),
 })
 
+/**
+ * Sucursal: un local del negocio con sus ubicaciones (tienda, depósito, cocina) y sus cajas.
+ * Todas comparten el catálogo, los clientes y las cuentas; cada una tiene su inventario, sus
+ * turnos y sus informes, y sus datos salen en el recibo de lo que se vende allí. La primera,
+ * `main`, existe siempre (con una sola, no se nota).
+ */
+export const branch = sqliteTable("branch", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull().unique(),
+  /** Para el recibo; vacíos, los del negocio. */
+  address: text("address"),
+  phone: text("phone"),
+  /** Lista de precios con que vende (vacío: el precio base). */
+  priceListId: text("price_list_id"),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at").notNull(),
+})
+
 export const location = sqliteTable("location", {
   id: text("id").primaryKey(),
   businessId: text("business_id")
     .notNull()
     .references(() => business.id),
+  /** Siempre lleno (las anteriores a las sucursales quedaron en `main`). */
+  branchId: text("branch_id").references(() => branch.id),
   name: text("name").notNull(),
   kind: text("kind", { enum: ["store", "warehouse", "kitchen"] }).notNull(),
   active: integer("active", { mode: "boolean" }).notNull().default(true),

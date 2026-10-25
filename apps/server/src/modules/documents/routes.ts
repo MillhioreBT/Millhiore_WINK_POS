@@ -5,6 +5,7 @@ import {
   documentSummarySchema,
   postDocumentSchema,
   postedDocumentSchema,
+  recordInvoiceSchema,
   returnableSchema,
   returnBodySchema,
   voidDocumentSchema,
@@ -16,9 +17,11 @@ import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { HttpError } from "../../http/errors"
 import { postDocument, voidDocument } from "../../posting"
+import { branchesFor, locationsIn } from "../branches/service"
 import { printInBackground } from "../kitchen/routes"
 import { ticketsForSale } from "../kitchen/service"
 import { postingContext } from "../settings/service"
+import { recordInvoice } from "./invoices"
 import { documentType, postReturn, returnableOf } from "./returns"
 import { getDocument, isDocumentType, listDocuments } from "./service"
 
@@ -124,6 +127,10 @@ const listRoute = createRoute({
       /** Desde/hasta (ms Unix, hasta excluido). */
       from: z.coerce.number().int().optional(),
       to: z.coerce.number().int().optional(),
+      /** Solo los de esta sucursal (quien trabaja en algunas, ve solo las suyas). */
+      branchId: z.string().min(1).optional(),
+      /** `pending`: solo las ventas con factura que todavía no tienen sus números. */
+      invoice: z.enum(["pending"]).optional(),
       limit: z.coerce.number().int().min(1).max(500).default(100),
     }),
   },
@@ -151,6 +158,29 @@ const detailRoute = createRoute({
   },
 })
 
+const invoiceRoute = createRoute({
+  method: "put",
+  path: "/api/documents/{id}/invoice",
+  tags: ["Documentos"],
+  summary: "Anota el número de la factura y el número de control de una venta",
+  description:
+    "La factura la emite el medio autorizado (máquina fiscal, forma libre o el medio digital del SENIAT); aquí se anotan sus números. Cambiarlos después pide `sale.void`.",
+  request: {
+    params: z.object({ id: z.string().min(1) }),
+    body: { content: { "application/json": { schema: recordInvoiceSchema } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "La venta con sus números",
+      content: { "application/json": { schema: documentDetailSchema } },
+    },
+    403: errors[403],
+    404: { description: "No existe", content: { "application/json": { schema: apiErrorSchema } } },
+    409: errors[409],
+    422: errors[422],
+  },
+})
+
 /** Ver documentos de un tipo exige poder crearlos o ver informes. */
 export function canView(permissions: ReadonlySet<string>, type: string): boolean {
   if (permissions.has("report.view")) return true
@@ -173,6 +203,8 @@ export function registerDocumentRoutes(app: App, deps: AppDeps): void {
       types: types?.filter(isDocumentType),
       from: q.from,
       to: q.to,
+      branchIds: branchesFor(actor.branchIds, q.branchId),
+      invoicePending: q.invoice === "pending",
       limit: q.limit,
     })
     return c.json(
@@ -181,11 +213,23 @@ export function registerDocumentRoutes(app: App, deps: AppDeps): void {
     )
   })
 
+  app.openapi(invoiceRoute, (c) => {
+    const actor = requirePermission(c, "sale.create")
+    const { id } = c.req.valid("param")
+    recordInvoice(deps.db, id, c.req.valid("json"), actor, deps.now())
+    return c.json(getDocument(deps.db, id), 200)
+  })
+
   app.openapi(detailRoute, (c) => {
     const actor = actorOf(c)
     const doc = getDocument(deps.db, c.req.valid("param").id)
     if (!canView(actor.permissions, doc.type))
       throw new HttpError(403, "FORBIDDEN", "No puedes ver este documento")
+    // De otra sucursal no, salvo un traslado que llegó a una de las suyas.
+    const here = locationsIn(deps.db, actor.branchIds)
+    if (here && ![doc.locationId, doc.toLocationId].some((id) => id && here.has(id))) {
+      throw new HttpError(403, "OTHER_BRANCH", "Es de una sucursal donde no trabajas")
+    }
     return c.json(doc, 200)
   })
 

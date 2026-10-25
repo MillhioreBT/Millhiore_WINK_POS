@@ -41,7 +41,28 @@ describe("config", () => {
       dataDir,
       backupsKeep: 14,
     })
-    expect(cfg.trustedOrigins).toEqual(defaultTrustedOrigins(3000))
+    expect(cfg.httpsPort).toBe(3443)
+    expect(cfg.trustedOrigins).toEqual(defaultTrustedOrigins(3000, 3443))
+    expect(cfg.trustedOrigins).toContain("https://192.168.*.*:3443")
+  })
+
+  test("HTTPS en otro puerto o apagado", () => {
+    const dataDir = tmp()
+    expect(loadConfig({ DATA_DIR: dataDir, PORT: "3999" }).httpsPort).toBe(4442)
+    expect(loadConfig({ DATA_DIR: dataDir, HTTPS_PORT: "8443" }).httpsPort).toBe(8443)
+    const off = loadConfig({ DATA_DIR: dataDir, HTTPS: "off" })
+    expect(off.httpsPort).toBeNull()
+    expect(off.trustedOrigins.some((o) => o.startsWith("https://"))).toBe(false)
+    expect(() => loadConfig({ DATA_DIR: dataDir, HTTPS_PORT: "0" })).toThrow(/HTTPS_PORT/)
+  })
+
+  test("el catálogo en línea tiene su propio puerto, que se cambia o se apaga", () => {
+    const dataDir = tmp()
+    expect(loadConfig({ DATA_DIR: dataDir }).catalogPort).toBe(3080)
+    expect(loadConfig({ DATA_DIR: dataDir, PORT: "3999" }).catalogPort).toBe(4079)
+    expect(loadConfig({ DATA_DIR: dataDir, CATALOG_PORT: "8080" }).catalogPort).toBe(8080)
+    expect(loadConfig({ DATA_DIR: dataDir, CATALOG: "off" }).catalogPort).toBeNull()
+    expect(() => loadConfig({ DATA_DIR: dataDir, CATALOG_PORT: "x" })).toThrow(/CATALOG_PORT/)
   })
 
   test("admite orígenes extra y rechaza un puerto inválido", () => {

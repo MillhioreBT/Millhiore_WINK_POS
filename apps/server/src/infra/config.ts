@@ -4,6 +4,16 @@ import { join, resolve } from "node:path"
 
 export interface Config {
   port: number
+  /**
+   * Puerto de HTTPS en la red local (con la autoridad certificadora propia); null si se apagó con
+   * HTTPS=off. De fábrica, el de HTTP más 443 (3000 → 3443).
+   */
+  httpsPort: number | null
+  /**
+   * Puerto que solo sirve el catálogo en línea (lo único que se publica en internet); null si se
+   * apagó con CATALOG=off. De fábrica, el de HTTP más 80 (3000 → 3080).
+   */
+  catalogPort: number | null
   /** Carpeta de datos: base SQLite, respaldos y secreto de sesión. */
   dataDir: string
   baseURL: string
@@ -27,13 +37,19 @@ export function resolveWebRoot(env: Record<string, string | undefined>): string 
  * Orígenes desde los que se admiten sesiones: la propia máquina y las redes locales privadas,
  * para que tablets y celulares entren por la IP de la caja. Nunca internet abierta.
  */
-export function defaultTrustedOrigins(port: number): string[] {
+export function defaultTrustedOrigins(port: number, httpsPort: number | null = null): string[] {
+  const local = (scheme: string, p: number) => [
+    `${scheme}://localhost:${p}`,
+    `${scheme}://127.0.0.1:${p}`,
+    `${scheme}://192.168.*.*:${p}`,
+    `${scheme}://10.*.*.*:${p}`,
+    `${scheme}://172.*.*.*:${p}`,
+    // Las direcciones de Tailscale (100.64.0.0/10): el acceso remoto desde los equipos propios.
+    `${scheme}://100.*.*.*:${p}`,
+  ]
   return [
-    `http://localhost:${port}`,
-    `http://127.0.0.1:${port}`,
-    `http://192.168.*.*:${port}`,
-    `http://10.*.*.*:${port}`,
-    `http://172.*.*.*:${port}`,
+    ...local("http", port),
+    ...(httpsPort ? [...local("https", httpsPort), `https://*.local:${httpsPort}`] : []),
   ]
 }
 
@@ -61,11 +77,24 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     .split(",")
     .map((o) => o.trim())
     .filter(Boolean)
+  const httpsPort = env.HTTPS === "off" ? null : Number(env.HTTPS_PORT ?? port + 443)
+  if (httpsPort !== null && (!Number.isInteger(httpsPort) || httpsPort < 1 || httpsPort > 65535)) {
+    throw new Error(`HTTPS_PORT inválido: ${env.HTTPS_PORT}`)
+  }
+  const catalogPort = env.CATALOG === "off" ? null : Number(env.CATALOG_PORT ?? port + 80)
+  if (
+    catalogPort !== null &&
+    (!Number.isInteger(catalogPort) || catalogPort < 1 || catalogPort > 65535)
+  ) {
+    throw new Error(`CATALOG_PORT inválido: ${env.CATALOG_PORT}`)
+  }
   return {
     port,
+    httpsPort,
+    catalogPort,
     dataDir,
     baseURL: env.BASE_URL ?? `http://localhost:${port}`,
-    trustedOrigins: [...defaultTrustedOrigins(port), ...extra],
+    trustedOrigins: [...defaultTrustedOrigins(port, httpsPort), ...extra],
     authSecret: resolveAuthSecret(dataDir, env),
     backupsKeep: Number(env.BACKUPS_KEEP ?? 14),
     trustProxy: env.TRUST_PROXY === "true",

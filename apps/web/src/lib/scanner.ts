@@ -1,4 +1,5 @@
-import type { CatalogItem } from "@millhiore/contracts"
+import type { CatalogItem, ScaleSettings } from "@millhiore/contracts"
+import { parseWeightBarcode } from "@millhiore/domain"
 import type { BarcodeDetector } from "barcode-detector/ponyfill"
 
 // Lector de códigos de barras con la cámara. Usa zxing (WebAssembly) en todos los navegadores, para
@@ -62,4 +63,31 @@ export function liveCameraAvailable(): boolean {
 export function findByCode(items: readonly CatalogItem[], code: string): CatalogItem | undefined {
   const c = code.trim().toLowerCase()
   return items.find((p) => p.barcode?.toLowerCase() === c || p.sku.toLowerCase() === c)
+}
+
+/** Lo que trae un código leído: el producto y, si es la etiqueta de la balanza, el peso o el precio. */
+export interface CodeMatch {
+  item: CatalogItem
+  weightMilli?: number
+  priceMinor?: number
+}
+
+/**
+ * El producto de un código: primero el código de barras o el SKU exacto y, si no hay y es una
+ * etiqueta de la balanza, el producto con ese PLU con su peso o su precio.
+ */
+export function matchCode(
+  items: readonly CatalogItem[],
+  code: string,
+  scale: ScaleSettings | null,
+): CodeMatch | undefined {
+  const exact = findByCode(items, code)
+  if (exact) return { item: exact }
+  const label = scale ? parseWeightBarcode(code, scale) : null
+  if (!label) return undefined
+  const item = items.find((p) => p.plu === label.plu)
+  if (!item) return undefined
+  return label.weightMilli !== undefined
+    ? { item, weightMilli: label.weightMilli }
+    : { item, priceMinor: label.priceMinor }
 }

@@ -1,6 +1,6 @@
 import type { CatalogItem, LabelSettings } from "@millhiore/contracts"
 import { type Barcode, barcodeFor } from "../../lib/barcode"
-import { formatMoney } from "../../lib/format"
+import { formatMoney, perUnit } from "../../lib/format"
 import { convertMinor, type PosContext } from "../pos/compute"
 
 /** Una hoja de etiquetas adhesivas: la página y dónde cae cada etiqueta, en milímetros. */
@@ -79,18 +79,20 @@ export function codeOf(item: CatalogItem): Barcode | null {
 /** El precio que se imprime según los ajustes; null si no lleva o no se puede convertir. */
 export function priceText(
   ctx: PosContext,
-  item: Pick<CatalogItem, "priceMinor" | "priceCurrency">,
+  item: Pick<CatalogItem, "priceMinor" | "priceCurrency"> & Partial<Pick<CatalogItem, "unit">>,
   mode: LabelSettings["price"],
 ): string | null {
+  // Lo que se vende por kilo, litro o metro lleva el precio por esa unidad: «$ 12,00/kg».
+  const per = perUnit(item.unit)
   const as = (currency: string) => {
     const minor = convertMinor(ctx, item.priceMinor, item.priceCurrency, currency)
-    return minor === null ? null : formatMoney(minor, currency)
+    return minor === null ? null : `${formatMoney(minor, currency)}${per}`
   }
   switch (mode) {
     case "none":
       return null
     case "own":
-      return formatMoney(item.priceMinor, item.priceCurrency)
+      return `${formatMoney(item.priceMinor, item.priceCurrency)}${per}`
     case "reference":
       return as(ctx.refCurrency)
     case "legal":

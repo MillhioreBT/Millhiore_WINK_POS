@@ -1,5 +1,6 @@
 import {
   account,
+  branch,
   business,
   createDb,
   type Db,
@@ -72,8 +73,15 @@ export function createTestDb(): Db {
       createdAt: now,
     })
     .run()
+  db.insert(branch).values({ id: "main", name: "Principal", createdAt: now }).run()
   db.insert(location)
-    .values({ id: ids.location, businessId: "biz", name: "Tienda", kind: "store" })
+    .values({
+      id: ids.location,
+      businessId: "biz",
+      branchId: "main",
+      name: "Tienda",
+      kind: "store",
+    })
     .run()
   db.insert(terminal)
     .values({ id: ids.terminal, locationId: ids.location, code: "C1", name: "Caja 1" })

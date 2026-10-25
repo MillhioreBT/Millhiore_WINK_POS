@@ -1,5 +1,6 @@
 import type { Permission } from "@millhiore/domain"
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
+import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core"
+import { branch } from "./core"
 
 export const role = sqliteTable("role", {
   id: text("id").primaryKey(),
@@ -30,6 +31,20 @@ export const user = sqliteTable("user", {
   /** PIN de caja (4–6 dígitos) con Argon2id: desbloquea la pantalla sin escribir la contraseña. */
   pinHash: text("pin_hash"),
 })
+
+/** Sucursales donde trabaja cada usuario: sin filas, en todas. */
+export const userBranch = sqliteTable(
+  "user_branch",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    branchId: text("branch_id")
+      .notNull()
+      .references(() => branch.id),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.branchId] })],
+)
 
 export const session = sqliteTable(
   "session",
@@ -81,4 +96,30 @@ export const verification = sqliteTable(
     updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   },
   (t) => [index("verification_identifier").on(t.identifier)],
+)
+
+/**
+ * Clave de la API para otros sistemas (tienda en línea, contabilidad, un script): actúa como el
+ * usuario que la creó, con los permisos que se le dieron (nunca más que los de ese usuario). Solo
+ * se guarda el hash del secreto, que se muestra una vez al crearla.
+ */
+export const apiKey = sqliteTable(
+  "api_key",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    /** El comienzo del secreto («mwk_Ab12Cd34»), para reconocerla en la lista. */
+    prefix: text("prefix").notNull(),
+    /** SHA-256 del secreto, en hexadecimal. */
+    secretHash: text("secret_hash").notNull().unique(),
+    permissions: text("permissions", { mode: "json" }).notNull().$type<Permission[]>(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id),
+    createdAt: integer("created_at").notNull(),
+    lastUsedAt: integer("last_used_at"),
+    /** Revocada: deja de funcionar para siempre. */
+    revokedAt: integer("revoked_at"),
+  },
+  (t) => [index("api_key_user").on(t.userId)],
 )

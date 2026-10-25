@@ -17,16 +17,21 @@ const AUTH_MESSAGES: Record<string, string> = {
   TOO_MANY_REQUESTS: "Demasiados intentos. Espera un minuto e intenta de nuevo",
 }
 
+/** El cuerpo va como JSON, salvo un archivo (una foto), que va tal cual con su tipo. */
 export async function api<T>(
   path: string,
   init: { method?: string; body?: unknown; signal?: AbortSignal } = {},
 ): Promise<T> {
+  const file = init.body instanceof Blob ? init.body : null
   let res: Response
   try {
     res = await fetch(path, {
       method: init.method ?? (init.body === undefined ? "GET" : "POST"),
-      headers: init.body === undefined ? {} : { "content-type": "application/json" },
-      body: init.body === undefined ? null : JSON.stringify(init.body),
+      headers:
+        init.body === undefined
+          ? {}
+          : { "content-type": file ? file.type || "application/octet-stream" : "application/json" },
+      body: init.body === undefined ? null : (file ?? JSON.stringify(init.body)),
       credentials: "same-origin",
       ...(init.signal ? { signal: init.signal } : {}),
     })

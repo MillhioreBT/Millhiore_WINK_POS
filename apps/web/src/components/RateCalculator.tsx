@@ -16,6 +16,7 @@ import {
   formatDateTime,
   formatRate,
   parseAmount,
+  timeAgo,
   toInputAmount,
 } from "../lib/format"
 import { rateStatusQuery } from "../lib/queries"
@@ -24,16 +25,6 @@ import { can, useMe } from "../lib/session"
 const SOURCE: Record<string, string> = { bcv: "BCV", dolarapi: "BCV (espejo)", manual: "manual" }
 const NAME: Record<string, string> = { USD: "Dólares", EUR: "Euros", VES: "Bolívares" }
 const QUICK = [100, 500, 1000, 2000]
-
-/** «hace un momento», «hace 5 min», «hace 3 h», «hace 2 días». */
-function ago(ms: number, now = Date.now()): string {
-  const min = Math.max(0, Math.round((now - ms) / 60_000))
-  if (min < 1) return "hace un momento"
-  if (min < 60) return `hace ${min} min`
-  if (min < 60 * 24) return `hace ${Math.round(min / 60)} h`
-  const days = Math.round(min / (60 * 24))
-  return `hace ${days} ${days === 1 ? "día" : "días"}`
-}
 
 /**
  * La tasa del día en la barra de arriba. Al tocarla abre una calculadora: lo que se escribe en
@@ -93,7 +84,7 @@ export function RateCalculator({ className }: { className?: string }) {
         <div className="flex items-baseline justify-between gap-2">
           <h2 className="font-semibold text-sm">Calculadora</h2>
           <span className="text-muted-foreground text-xs">
-            {sourceName} · {ago(effectiveAt)}
+            {sourceName} · {timeAgo(effectiveAt)}
           </span>
         </div>
         {data.stale ? (

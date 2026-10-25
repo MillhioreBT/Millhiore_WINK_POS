@@ -1,4 +1,4 @@
-import type { CatalogItem, Contact, PickedModifier } from "@millhiore/contracts"
+import type { CatalogItem, Contact, PickedModifier, ProductUnit } from "@millhiore/contracts"
 import { uuidv7 } from "@millhiore/domain"
 import { create } from "zustand"
 import { createJSONStorage, persist } from "zustand/middleware"
@@ -8,6 +8,8 @@ export interface TicketLine {
   variantId: string
   name: string
   qtyMilli: number
+  /** Por kilo, litro o metro: la cantidad lleva decimales y se cambia escribiéndola. */
+  unit?: ProductUnit | undefined
   /** Precio del catálogo en su moneda; se pasa a Bs con la tasa al cobrar. */
   priceMinor: number
   priceCurrency: string
@@ -38,6 +40,14 @@ export interface PosQuote {
   validUntil: number
 }
 
+/** El pedido del catálogo en línea que se está cobrando: la venta lo deja atendido. */
+export interface PosOrder {
+  id: string
+  number: string
+  customerName: string
+  customerPhone: string
+}
+
 /**
  * La cuenta de una mesa que se está cobrando (toda o una parte): qué productos de la cuenta, y
  * cuánto de cada uno, paga esta venta.
@@ -62,6 +72,7 @@ export interface HeldTicket {
   charges?: TicketCharge[] | null | undefined
   quote?: PosQuote | null | undefined
   tab?: PosTab | null | undefined
+  order?: PosOrder | null | undefined
 }
 
 interface PosState {
@@ -81,6 +92,8 @@ interface PosState {
   quote: PosQuote | null
   /** Cuenta de una mesa que se está cobrando; sus productos no se tocan en la caja. */
   tab: PosTab | null
+  /** Pedido del catálogo que se está cobrando; null si la venta no sale de uno. */
+  order: PosOrder | null
   held: HeldTicket[]
   /**
    * Carga una cotización en la caja con sus precios congelados. Si había otra venta en curso,
@@ -94,6 +107,13 @@ interface PosState {
   loadTab: (tab: PosTab, lines: TicketLine[]) => void
   /** Deja de vender la cotización (la venta sigue como una normal). */
   detachQuote: () => void
+  /**
+   * Carga un pedido del catálogo con la lista de precios con que se pidió. Si había otra venta en
+   * curso, queda en espera.
+   */
+  loadOrder: (order: PosOrder, lines: TicketLine[], priceListId: string | null) => void
+  /** Deja de cobrar el pedido (la venta sigue como una normal). */
+  detachOrder: () => void
   setPriceList: (priceListId: string | null) => void
   setCharges: (charges: TicketCharge[]) => void
   setLineDiscount: (key: string, discount: DiscountSpec | null) => void
@@ -122,6 +142,7 @@ export const usePos = create<PosState>()(
       charges: null,
       quote: null,
       tab: null,
+      order: null,
       loadQuote: (quote, ticket) =>
         set((s) => ({
           held: s.lines.length
@@ -136,6 +157,7 @@ export const usePos = create<PosState>()(
                   charges: s.charges,
                   quote: s.quote,
                   tab: s.tab,
+                  order: s.order,
                 },
               ]
             : s.held,
@@ -146,6 +168,7 @@ export const usePos = create<PosState>()(
           charges: ticket.charges,
           quote,
           tab: null,
+          order: null,
         })),
       loadTab: (tab, lines) =>
         set((s) => ({
@@ -162,6 +185,7 @@ export const usePos = create<PosState>()(
                     charges: s.charges,
                     quote: s.quote,
                     tab: s.tab,
+                    order: s.order,
                   },
                 ]
               : s.held,
@@ -172,8 +196,37 @@ export const usePos = create<PosState>()(
           charges: null,
           quote: null,
           tab,
+          order: null,
         })),
       detachQuote: () => set({ quote: null }),
+      loadOrder: (order, lines, priceListId) =>
+        set((s) => ({
+          held: s.lines.length
+            ? [
+                ...s.held,
+                {
+                  saleId: s.saleId,
+                  heldAt: Date.now(),
+                  lines: s.lines,
+                  saleDiscount: s.saleDiscount,
+                  priceListId: s.priceListId,
+                  charges: s.charges,
+                  quote: s.quote,
+                  tab: s.tab,
+                  order: s.order,
+                },
+              ]
+            : s.held,
+          saleId: uuidv7(),
+          lines,
+          saleDiscount: null,
+          priceListId,
+          charges: null,
+          quote: null,
+          tab: null,
+          order,
+        })),
+      detachOrder: () => set({ order: null }),
       setPriceList: (priceListId) => set({ priceListId }),
       setCharges: (charges) => set({ charges }),
       setLineDiscount: (key, discount) =>
@@ -205,6 +258,7 @@ export const usePos = create<PosState>()(
                 variantId: item.variantId,
                 name: item.name,
                 qtyMilli,
+                ...(item.unit !== "unit" ? { unit: item.unit } : {}),
                 priceMinor: item.priceMinor,
                 priceCurrency: item.priceCurrency,
                 taxId: item.taxId,
@@ -240,6 +294,7 @@ export const usePos = create<PosState>()(
           charges: null,
           quote: null,
           tab: null,
+          order: null,
         }),
       held: [],
       hold: () =>
@@ -257,6 +312,7 @@ export const usePos = create<PosState>()(
                     charges: s.charges,
                     quote: s.quote,
                     tab: s.tab,
+                    order: s.order,
                   },
                 ],
                 saleId: uuidv7(),
@@ -266,6 +322,7 @@ export const usePos = create<PosState>()(
                 charges: null,
                 quote: null,
                 tab: null,
+                order: null,
               }
             : {},
         ),
@@ -287,6 +344,7 @@ export const usePos = create<PosState>()(
                     charges: s.charges,
                     quote: s.quote,
                     tab: s.tab,
+                    order: s.order,
                   },
                 ]
               : others,
@@ -297,6 +355,7 @@ export const usePos = create<PosState>()(
             charges: ticket.charges ?? null,
             quote: ticket.quote ?? null,
             tab: ticket.tab ?? null,
+            order: ticket.order ?? null,
           }
         }),
       discardHeld: (saleId) => set((s) => ({ held: s.held.filter((t) => t.saleId !== saleId) })),

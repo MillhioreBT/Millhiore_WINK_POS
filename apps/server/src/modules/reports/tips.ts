@@ -3,13 +3,17 @@ import { business, currency, type Db, document, user } from "@millhiore/db"
 import { convert, exchangeRate, money } from "@millhiore/domain"
 import { and, eq, gte, lt, ne } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
+import { inBranches } from "../branches/service"
 
 /**
  * Las propinas de un período por quien las recibe (o el equipo), netas de anulaciones: el reverso
  * de una venta lleva la propina con signo contrario. En moneda legal y en la de referencia, a la
  * tasa de cada venta (en un período largo, sumar bolívares de meses distintos engaña).
  */
-export function tipsReport(db: Db, opts: { from: number; to: number }): TipsReport {
+export function tipsReport(
+  db: Db,
+  opts: { from: number; to: number; branchIds?: readonly string[] | null },
+): TipsReport {
   const biz = db.select().from(business).get()
   if (!biz) throw new HttpError(409, "NOT_CONFIGURED", "El negocio aún no está configurado")
   const ref = biz.referenceCurrency
@@ -40,6 +44,7 @@ export function tipsReport(db: Db, opts: { from: number; to: number }): TipsRepo
         ne(document.tipMinor, 0),
         gte(document.postedAt, opts.from),
         lt(document.postedAt, opts.to),
+        inBranches(document.locationId, opts.branchIds ?? null),
       ),
     )
     .all()

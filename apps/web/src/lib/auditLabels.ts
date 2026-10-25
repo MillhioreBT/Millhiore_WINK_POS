@@ -10,6 +10,12 @@ const ACTION_LABEL: Record<string, string> = {
   "product.created": "Creó un producto",
   "product.updated": "Cambió un producto",
   "product.prices.bulk": "Cambió precios en lote",
+  "product.image.added": "Puso la foto de un producto",
+  "product.image.updated": "Cambió la foto de un producto",
+  "product.image.removed": "Quitó la foto de un producto",
+  "settings.storefront.updated": "Cambió el catálogo en línea",
+  "storefront.published": "Publicó el catálogo en internet",
+  "storefront.unpublished": "Dejó de publicar el catálogo en internet",
   "price-list.created": "Creó una lista de precios",
   "price-list.updated": "Cambió una lista de precios",
   "charge.created": "Creó un recargo de venta",
@@ -90,6 +96,7 @@ export const ACTION_GROUPS: readonly { prefix: string; label: string }[] = [
   { prefix: "user.", label: "Usuarios, claves y PIN" },
   { prefix: "session.", label: "Sesiones" },
   { prefix: "settings.", label: "Ajustes" },
+  { prefix: "storefront.", label: "Catálogo en línea" },
 ]
 
 const DOCUMENT_LABEL: Record<string, string> = {

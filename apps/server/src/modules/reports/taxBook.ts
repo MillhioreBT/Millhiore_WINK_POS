@@ -1,8 +1,9 @@
 import type { TaxBook } from "@millhiore/contracts"
-import { business, contact, type Db, document, documentTax } from "@millhiore/db"
-import { and, asc, eq, gte, inArray, lt } from "drizzle-orm"
+import { business, contact, type Db, document, documentTax, fiscalInvoice } from "@millhiore/db"
+import { and, asc, eq, gte, inArray, lt, sql } from "drizzle-orm"
 import { alias } from "drizzle-orm/sqlite-core"
 import { HttpError } from "../../http/errors"
+import { inBranches } from "../branches/service"
 
 type Group = TaxBook["rows"][number]["groups"][number]
 
@@ -16,7 +17,12 @@ const KIND_ORDER = { taxed: 0, exempt: 1, exonerated: 2, not_subject: 3 } as con
  */
 export function taxBook(
   db: Db,
-  opts: { kind: "sales" | "purchases"; from: number; to: number },
+  opts: {
+    kind: "sales" | "purchases"
+    from: number
+    to: number
+    branchIds?: readonly string[] | null
+  },
 ): TaxBook {
   const biz = db.select().from(business).get()
   if (!biz) throw new HttpError(409, "NOT_CONFIGURED", "El negocio aún no está configurado")
@@ -28,6 +34,7 @@ export function taxBook(
     inArray(document.type, [...types]),
     gte(document.postedAt, opts.from),
     lt(document.postedAt, opts.to),
+    inBranches(document.locationId, opts.branchIds ?? null),
   )
   const reversed = alias(document, "reversed")
   const returned = alias(document, "returned")
@@ -39,14 +46,20 @@ export function taxBook(
       postedAt: document.postedAt,
       reversesNumber: reversed.number,
       returnsNumber: returned.number,
-      contactName: contact.name,
-      contactTaxId: contact.taxId,
+      // Los datos que quedaron en el documento; los de antes de guardarlos, los de hoy.
+      contactName: sql<string | null>`coalesce(${document.customerName}, ${contact.name})`,
+      contactTaxId: sql<
+        string | null
+      >`case when ${document.customerName} is null then ${contact.taxId} else ${document.customerTaxId} end`,
       externalRef: document.externalRef,
+      invoiceNumber: fiscalInvoice.invoiceNumber,
+      controlNumber: fiscalInvoice.controlNumber,
       totalLegalMinor: document.totalLegalMinor,
       surchargeLegalMinor: document.surchargeLegalMinor,
     })
     .from(document)
     .leftJoin(contact, eq(contact.id, document.contactId))
+    .leftJoin(fiscalInvoice, eq(fiscalInvoice.documentId, document.id))
     .leftJoin(reversed, eq(reversed.id, document.reversesDocumentId))
     .leftJoin(returned, eq(returned.id, document.returnsDocumentId))
     .where(where)
@@ -112,6 +125,8 @@ export function taxBook(
       contactName: d.contactName,
       contactTaxId: d.contactTaxId,
       externalRef: d.externalRef,
+      invoiceNumber: d.invoiceNumber,
+      controlNumber: d.controlNumber,
       totalLegalMinor: sign * d.totalLegalMinor,
       surchargeLegalMinor: sign * d.surchargeLegalMinor,
       groups,

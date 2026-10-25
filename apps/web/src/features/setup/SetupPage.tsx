@@ -17,6 +17,7 @@ import { useState } from "react"
 import { ApiError, api, errorMessage } from "../../lib/api"
 import { healthQuery, queryClient } from "../../lib/queries"
 import { signIn } from "../../lib/session"
+import { JoinCentralForm } from "./JoinCentralForm"
 
 const TAXPAYER_HELP: Record<string, string> = {
   ordinary: "Cobra IVA. No cobra IGTF.",
@@ -26,6 +27,7 @@ const TAXPAYER_HELP: Record<string, string> = {
 
 export function SetupPage() {
   const navigate = useNavigate()
+  const [joining, setJoining] = useState(false)
   const [form, setForm] = useState({
     businessName: "",
     businessTaxId: "",
@@ -89,144 +91,166 @@ export function SetupPage() {
       <Card className="w-full max-w-xl">
         <CardHeader>
           <img src="/favicon.svg" alt="" className="mb-2 size-10" />
-          <CardTitle className="text-xl">Te damos la bienvenida a Millhiore WINK POS</CardTitle>
+          <CardTitle className="text-xl">
+            {joining ? "Unir esta PC como sucursal" : "Te damos la bienvenida a Millhiore WINK POS"}
+          </CardTitle>
           <CardDescription>
-            Configura tu negocio. Se crean la caja, los métodos de cobro (efectivo $ y Bs, pago
-            móvil, punto de venta, Zelle) y tu usuario de dueño. La tasa del BCV se consulta sola.
+            {joining
+              ? "Para una sucursal con su propio servidor: baja el negocio, el catálogo, los clientes y los usuarios del central, y lo que se venda aquí sube solo."
+              : "Configura tu negocio. Se crean la caja, los métodos de cobro (efectivo $ y Bs, pago móvil, punto de venta, Zelle) y tu usuario de dueño. La tasa del BCV se consulta sola."}
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={submit} className="grid grid-cols-1 gap-5">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_12rem]">
-              <Field label="Nombre del negocio" htmlFor="biz" error={errors["business.name"]}>
-                <Input
-                  id="biz"
-                  value={form.businessName}
-                  onChange={set("businessName")}
-                  required
-                  autoFocus
-                />
-              </Field>
-              <Field label="RIF" htmlFor="biz-rif" hint="Opcional" error={errors["business.taxId"]}>
-                <Input
-                  id="biz-rif"
-                  value={form.businessTaxId}
-                  onChange={set("businessTaxId")}
-                  placeholder="J-12345678-9"
-                  autoCapitalize="characters"
-                />
-              </Field>
-            </div>
-
-            <fieldset className="grid grid-cols-1 gap-4 rounded-lg border p-4">
-              <legend className="px-1 font-medium text-sm">Tu usuario (dueño)</legend>
-              <Field label="Tu nombre" htmlFor="owner" error={errors["owner.name"]}>
-                <Input id="owner" value={form.ownerName} onChange={set("ownerName")} required />
-              </Field>
-              <Field
-                label="Usuario"
-                htmlFor="user"
-                hint="Minúsculas, números, punto o guion bajo"
-                error={errors["owner.username"]}
-              >
-                <Input
-                  id="user"
-                  autoCapitalize="none"
-                  autoComplete="username"
-                  value={form.username}
-                  onChange={set("username")}
-                  required
-                />
-              </Field>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {joining ? (
+            <JoinCentralForm onBack={() => setJoining(false)} />
+          ) : (
+            <form onSubmit={submit} className="grid grid-cols-1 gap-5">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_12rem]">
+                <Field label="Nombre del negocio" htmlFor="biz" error={errors["business.name"]}>
+                  <Input
+                    id="biz"
+                    value={form.businessName}
+                    onChange={set("businessName")}
+                    required
+                    autoFocus
+                  />
+                </Field>
                 <Field
-                  label="Contraseña"
-                  htmlFor="pass"
-                  hint="Mínimo 8 caracteres"
-                  error={
-                    errors["owner.password"] ??
-                    (form.password
-                      ? passwordProblem(form.password, {
-                          username: form.username,
-                          name: form.ownerName,
-                          businessName: form.businessName,
-                        })
-                      : null)
-                  }
+                  label="RIF"
+                  htmlFor="biz-rif"
+                  hint="Opcional"
+                  error={errors["business.taxId"]}
                 >
                   <Input
-                    id="pass"
-                    type="password"
-                    autoComplete="new-password"
-                    value={form.password}
-                    onChange={set("password")}
-                    required
-                    minLength={8}
+                    id="biz-rif"
+                    value={form.businessTaxId}
+                    onChange={set("businessTaxId")}
+                    placeholder="J-12345678-9"
+                    autoCapitalize="characters"
                   />
                 </Field>
-                <Field label="Repite la contraseña" htmlFor="confirm" error={errors.confirm}>
+              </div>
+
+              <fieldset className="grid grid-cols-1 gap-4 rounded-lg border p-4">
+                <legend className="px-1 font-medium text-sm">Tu usuario (dueño)</legend>
+                <Field label="Tu nombre" htmlFor="owner" error={errors["owner.name"]}>
+                  <Input id="owner" value={form.ownerName} onChange={set("ownerName")} required />
+                </Field>
+                <Field
+                  label="Usuario"
+                  htmlFor="user"
+                  hint="Minúsculas, números, punto o guion bajo"
+                  error={errors["owner.username"]}
+                >
                   <Input
-                    id="confirm"
-                    type="password"
-                    autoComplete="new-password"
-                    value={form.confirm}
-                    onChange={set("confirm")}
+                    id="user"
+                    autoCapitalize="none"
+                    autoComplete="username"
+                    value={form.username}
+                    onChange={set("username")}
                     required
                   />
                 </Field>
-              </div>
-            </fieldset>
-
-            <fieldset className="grid grid-cols-1 gap-4 rounded-lg border p-4">
-              <legend className="px-1 font-medium text-sm">Impuestos</legend>
-              <Field
-                label="Condición ante el SENIAT"
-                htmlFor="taxpayer"
-                hint={TAXPAYER_HELP[form.taxpayer]}
-              >
-                <NativeSelect id="taxpayer" value={form.taxpayer} onChange={set("taxpayer")}>
-                  <option value="ordinary">Contribuyente ordinario</option>
-                  <option value="special">Sujeto pasivo especial</option>
-                  <option value="none">No cobro IVA</option>
-                </NativeSelect>
-              </Field>
-              <div className="flex items-start gap-3">
-                <input
-                  id="incl"
-                  type="checkbox"
-                  className="mt-0.5 size-4 accent-[var(--primary)]"
-                  checked={form.pricesIncludeTax}
-                  onChange={set("pricesIncludeTax")}
-                />
-                <div className="grid grid-cols-1 gap-1">
-                  <Label htmlFor="incl">Mis precios ya incluyen el IVA</Label>
-                  <p className="text-muted-foreground text-xs">
-                    Es lo normal en la vitrina: el cliente paga el precio que ve. Si lo desmarcas,
-                    el IVA se suma al cobrar.
-                  </p>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Field
+                    label="Contraseña"
+                    htmlFor="pass"
+                    hint="Mínimo 8 caracteres"
+                    error={
+                      errors["owner.password"] ??
+                      (form.password
+                        ? passwordProblem(form.password, {
+                            username: form.username,
+                            name: form.ownerName,
+                            businessName: form.businessName,
+                          })
+                        : null)
+                    }
+                  >
+                    <Input
+                      id="pass"
+                      type="password"
+                      autoComplete="new-password"
+                      value={form.password}
+                      onChange={set("password")}
+                      required
+                      minLength={8}
+                    />
+                  </Field>
+                  <Field label="Repite la contraseña" htmlFor="confirm" error={errors.confirm}>
+                    <Input
+                      id="confirm"
+                      type="password"
+                      autoComplete="new-password"
+                      value={form.confirm}
+                      onChange={set("confirm")}
+                      required
+                    />
+                  </Field>
                 </div>
-              </div>
-            </fieldset>
+              </fieldset>
 
-            <Field
-              label="Código de la caja"
-              htmlFor="term"
-              hint="Prefijo de los números de venta: C1-000001"
-            >
-              <Input
-                id="term"
-                value={form.terminalCode}
-                onChange={set("terminalCode")}
-                maxLength={6}
-                className="w-32 uppercase"
-              />
-            </Field>
+              <fieldset className="grid grid-cols-1 gap-4 rounded-lg border p-4">
+                <legend className="px-1 font-medium text-sm">Impuestos</legend>
+                <Field
+                  label="Condición ante el SENIAT"
+                  htmlFor="taxpayer"
+                  hint={TAXPAYER_HELP[form.taxpayer]}
+                >
+                  <NativeSelect id="taxpayer" value={form.taxpayer} onChange={set("taxpayer")}>
+                    <option value="ordinary">Contribuyente ordinario</option>
+                    <option value="special">Sujeto pasivo especial</option>
+                    <option value="none">No cobro IVA</option>
+                  </NativeSelect>
+                </Field>
+                <div className="flex items-start gap-3">
+                  <input
+                    id="incl"
+                    type="checkbox"
+                    className="mt-0.5 size-4 accent-[var(--primary)]"
+                    checked={form.pricesIncludeTax}
+                    onChange={set("pricesIncludeTax")}
+                  />
+                  <div className="grid grid-cols-1 gap-1">
+                    <Label htmlFor="incl">Mis precios ya incluyen el IVA</Label>
+                    <p className="text-muted-foreground text-xs">
+                      Es lo normal en la vitrina: el cliente paga el precio que ve. Si lo desmarcas,
+                      el IVA se suma al cobrar.
+                    </p>
+                  </div>
+                </div>
+              </fieldset>
 
-            {errors.form ? <p className="text-destructive text-sm">{errors.form}</p> : null}
-            <Button type="submit" size="lg" disabled={busy}>
-              <RocketIcon /> {busy ? "Configurando…" : "Empezar"}
-            </Button>
-          </form>
+              <Field
+                label="Código de la caja"
+                htmlFor="term"
+                hint="Prefijo de los números de venta: C1-000001"
+              >
+                <Input
+                  id="term"
+                  value={form.terminalCode}
+                  onChange={set("terminalCode")}
+                  maxLength={6}
+                  className="w-32 uppercase"
+                />
+              </Field>
+
+              {errors.form ? <p className="text-destructive text-sm">{errors.form}</p> : null}
+              <Button type="submit" size="lg" disabled={busy}>
+                <RocketIcon /> {busy ? "Configurando…" : "Empezar"}
+              </Button>
+              <p className="text-center text-muted-foreground text-sm">
+                ¿Es una sucursal de un negocio que ya usa la app en otra PC?{" "}
+                <button
+                  type="button"
+                  className="font-medium text-foreground underline underline-offset-2"
+                  onClick={() => setJoining(true)}
+                >
+                  Unir esta PC como sucursal
+                </button>
+              </p>
+            </form>
+          )}
         </CardContent>
       </Card>
     </div>

@@ -22,6 +22,7 @@ import { convert, exchangeRate, money, uuidv7 } from "@millhiore/domain"
 import { and, asc, desc, eq, gte, lt, sql } from "drizzle-orm"
 import { alias } from "drizzle-orm/sqlite-core"
 import { HttpError } from "../../http/errors"
+import { inBranches } from "../branches/service"
 import { rateAt } from "../rates/service"
 
 // Producción por tandas
@@ -180,6 +181,8 @@ export function listAdjustments(
     limit: number
     /** Quien consulta puede ver costos; si no, los valores van vacíos. */
     seeCost: boolean
+    /** Solo los de estas sucursales; null, todas. */
+    branchIds?: readonly string[] | null | undefined
   },
 ): StockAdjustments {
   const biz = db.select().from(business).get()
@@ -224,6 +227,7 @@ export function listAdjustments(
         opts.from === undefined ? undefined : gte(document.postedAt, opts.from),
         opts.to === undefined ? undefined : lt(document.postedAt, opts.to),
         opts.reasonId ? eq(document.stockReasonId, opts.reasonId) : undefined,
+        inBranches(document.locationId, opts.branchIds ?? null),
       ),
     )
     .orderBy(desc(document.postedAt), desc(document.id), asc(documentLine.lineNo))

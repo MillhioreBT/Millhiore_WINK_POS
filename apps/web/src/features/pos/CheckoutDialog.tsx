@@ -8,16 +8,19 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  Field,
   Input,
+  Label,
   NativeSelect,
 } from "@millhiore/ui"
 import { useQuery } from "@tanstack/react-query"
 import { BookOpenIcon, MinusIcon, PlusIcon } from "lucide-react"
 import { useMemo, useState } from "react"
 import { toast } from "sonner"
-import { api, errorMessage } from "../../lib/api"
+import { ApiError, api, errorMessage } from "../../lib/api"
 import {
   currencySymbol,
+  formatDateTime,
   formatDay,
   formatMoney,
   formatPercent,
@@ -38,6 +41,7 @@ import {
   paymentRate,
   type Ticket,
 } from "./compute"
+import { useOfflineSales } from "./offline"
 import { PaymentPanel, useChange } from "./PaymentPanel"
 import { usePos } from "./store"
 
@@ -53,6 +57,7 @@ export function CheckoutDialog({
   terminalId,
   onClose,
   onPosted,
+  onQueued,
 }: {
   ctx: PosContext
   lines: CartLine[]
@@ -61,6 +66,8 @@ export function CheckoutDialog({
   terminalId: string
   onClose: () => void
   onPosted: (documentId: string) => void
+  /** Quedó guardada sin conexión: se enviará sola (no hay recibo todavía). */
+  onQueued: () => void
 }) {
   const me = useMe()
   const features = useFeatures()
@@ -69,12 +76,21 @@ export function CheckoutDialog({
   const [busy, setBusy] = useState(false)
   const quote = usePos((s) => s.quote)
   const tab = usePos((s) => s.tab)
+  const order = usePos((s) => s.order)
   // Una mesa que paga a partes iguales: cuánto le toca a cada quien.
   const [parts, setParts] = useState(1)
   const discountCode = usePos((s) => s.saleDiscount?.code)
   // Una venta que sale de una cotización viene con su cliente.
   const [customer, setCustomer] = useState<Contact | null>(quote?.contact ?? null)
   const [onCredit, setOnCredit] = useState(false)
+  // Con factura: los datos fiscales del cliente (los del cliente elegido, o escritos aquí).
+  const [invoice, setInvoice] = useState(false)
+  const [fiscal, setFiscal] = useState({ name: "", taxId: "", address: "" })
+  const fiscalOf = (c: Contact | null) => ({
+    name: c?.name ?? "",
+    taxId: c?.taxId ?? "",
+    address: c?.address ?? "",
+  })
   const { priceListId, setPriceList } = usePos()
   /** Lista del cliente elegido, si no es la que ya tiene la venta. */
   const customerList =
@@ -136,6 +152,7 @@ export function CheckoutDialog({
 
   const pickCustomer = (c: Contact | null) => {
     setCustomer(c)
+    if (invoice) setFiscal(fiscalOf(c))
     if (!c) setOnCredit(false)
     // Un cliente con lista de precios compra con ella; si ya se anotaron pagos, se ofrece.
     if (c?.priceListId && ctx.priceLists.has(c.priceListId) && payments.length === 0) {
@@ -158,7 +175,8 @@ export function CheckoutDialog({
         reference: null,
       })
     }
-    if (!computeCheckout(ctx, ticket, final, credit).settled) {
+    const due = computeCheckout(ctx, ticket, final, credit)
+    if (!due.settled) {
       toast.error("Los pagos no cubren el total")
       return
     }
@@ -170,50 +188,65 @@ export function CheckoutDialog({
       toast.error("Escribe bien la propina")
       return
     }
+    if (invoice && (!fiscal.name.trim() || !fiscal.taxId.trim())) {
+      toast.error("Para la factura escribe el nombre y la cédula o el RIF del cliente")
+      return
+    }
+    const body = {
+      id: saleId,
+      type: "SALE",
+      terminalId,
+      currency: doc,
+      rate: ctx.rate,
+      pricesIncludeTax: ctx.fiscal.pricesIncludeTax,
+      contactId: customer?.id ?? null,
+      ...(invoice
+        ? {
+            invoice: true,
+            customer: {
+              name: fiscal.name.trim(),
+              taxId: fiscal.taxId.trim(),
+              address: fiscal.address.trim() || null,
+            },
+          }
+        : {}),
+      ...(quote ? { quoteId: quote.id } : {}),
+      ...(order ? { webOrderId: order.id } : {}),
+      ...(tab ? { tab: { id: tab.id, lines: tab.lines } } : {}),
+      ...(discountCode ? { discountCodeId: discountCode.id } : {}),
+      ...(credit ? { creditMinor: credit.amountMinor, creditCurrency: credit.currency } : {}),
+      ...(tipMinor ? { tipMinor, tipUserId: tipUserId || null } : {}),
+      lines: lines.map((l) => ({
+        variantId: l.variantId,
+        qtyMilli: l.qtyMilli,
+        unitPriceMinor: l.unitPriceMinor,
+        discountMinor: l.discountMinor ?? 0,
+        ...(l.modifiers?.length ? { modifierIds: l.modifiers.map((m) => m.id) } : {}),
+        ...(l.note ? { note: l.note } : {}),
+      })),
+      // Recargos (delivery, servicio): el fijo con el monto que se ve; el % lo calcula el servidor.
+      charges: ticket.charges.map((c) => ({
+        chargeId: c.chargeId,
+        ...(c.kind === "fixed" ? { amountMinor: c.amountMinor } : {}),
+      })),
+      payments: final.map((p) => ({
+        id: p.id,
+        paymentMethodId: p.methodId,
+        currency: p.currency,
+        amountMinor: p.amountMinor,
+        rate: paymentRate(ctx, p.currency),
+        reference: p.reference,
+      })),
+    }
     setBusy(true)
     try {
-      const posted = await api<PostedDocumentBody>("/api/documents", {
-        body: {
-          id: saleId,
-          type: "SALE",
-          terminalId,
-          currency: doc,
-          rate: ctx.rate,
-          pricesIncludeTax: ctx.fiscal.pricesIncludeTax,
-          contactId: customer?.id ?? null,
-          ...(quote ? { quoteId: quote.id } : {}),
-          ...(tab ? { tab: { id: tab.id, lines: tab.lines } } : {}),
-          ...(discountCode ? { discountCodeId: discountCode.id } : {}),
-          ...(credit ? { creditMinor: credit.amountMinor, creditCurrency: credit.currency } : {}),
-          ...(tipMinor ? { tipMinor, tipUserId: tipUserId || null } : {}),
-          lines: lines.map((l) => ({
-            variantId: l.variantId,
-            qtyMilli: l.qtyMilli,
-            unitPriceMinor: l.unitPriceMinor,
-            discountMinor: l.discountMinor ?? 0,
-            ...(l.modifiers?.length ? { modifierIds: l.modifiers.map((m) => m.id) } : {}),
-            ...(l.note ? { note: l.note } : {}),
-          })),
-          // Recargos (delivery, servicio): el fijo con el monto que se ve; el % lo calcula el servidor.
-          charges: ticket.charges.map((c) => ({
-            chargeId: c.chargeId,
-            ...(c.kind === "fixed" ? { amountMinor: c.amountMinor } : {}),
-          })),
-          payments: final.map((p) => ({
-            id: p.id,
-            paymentMethodId: p.methodId,
-            currency: p.currency,
-            amountMinor: p.amountMinor,
-            rate: paymentRate(ctx, p.currency),
-            reference: p.reference,
-          })),
-        },
-      })
+      const posted = await api<PostedDocumentBody>("/api/documents", { body })
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["products"] }),
         queryClient.invalidateQueries({ queryKey: ["documents"] }),
         queryClient.invalidateQueries({ queryKey: ["receivables"] }),
         ...(quote ? [queryClient.invalidateQueries({ queryKey: ["quotes"] })] : []),
+        ...(order ? [queryClient.invalidateQueries({ queryKey: ["orders"] })] : []),
         ...(tab
           ? [
               queryClient.invalidateQueries({ queryKey: ["dining"] }),
@@ -224,7 +257,30 @@ export function CheckoutDialog({
       toast.success(`Venta ${posted.number} registrada${credit ? " a crédito" : ""}`)
       onPosted(posted.id)
     } catch (e) {
-      toast.error(errorMessage(e))
+      if (!(e instanceof ApiError && e.code === "OFFLINE")) {
+        toast.error(errorMessage(e))
+        return
+      }
+      // Sin conexión con el servidor: una venta sencilla queda guardada en el equipo y se envía
+      // sola. Una mesa, un fiado, una cotización o un pedido dependen de lo que hay en el
+      // servidor: esperan.
+      if (tab || quote || credit || order) {
+        const what = tab ? "la mesa" : credit ? "el fiado" : quote ? "la cotización" : "el pedido"
+        toast.error(`Sin conexión con el servidor: ${what} se cobra cuando vuelva`)
+        return
+      }
+      useOfflineSales.getState().enqueue({
+        id: saleId,
+        body: { ...body, note: `Cobrada sin conexión el ${formatDateTime(Date.now())}` },
+        queuedAt: Date.now(),
+        userId: me.id,
+        userName: me.name,
+        totalMinor: due.dueMinor,
+        currency: doc,
+        items: lines.length,
+      })
+      toast.warning("Sin conexión: la venta quedó guardada en este equipo y se envía sola")
+      onQueued()
     } finally {
       setBusy(false)
     }
@@ -385,6 +441,60 @@ export function CheckoutDialog({
           onChange={pickCustomer}
           placeholder="Cliente (opcional): nombre, cédula o teléfono"
         />
+        {ctx.fiscal.invoices ? (
+          <div className="grid grid-cols-1 gap-3 rounded-lg border p-3">
+            <div className="flex items-center gap-2">
+              <input
+                id="co-invoice"
+                type="checkbox"
+                className="size-4 accent-[var(--primary)]"
+                checked={invoice}
+                onChange={(e) => {
+                  setInvoice(e.target.checked)
+                  if (e.target.checked) setFiscal(fiscalOf(customer))
+                }}
+              />
+              <Label htmlFor="co-invoice" className="shrink-0">
+                Con factura
+              </Label>
+              <span className="min-w-0 text-muted-foreground text-xs">
+                {invoice
+                  ? "se emite en la máquina fiscal o el talonario"
+                  : "sale como nota de venta"}
+              </span>
+            </div>
+            {invoice ? (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field label="Nombre o razón social" htmlFor="co-inv-name">
+                  <Input
+                    id="co-inv-name"
+                    value={fiscal.name}
+                    onChange={(e) => setFiscal({ ...fiscal, name: e.target.value })}
+                    maxLength={120}
+                  />
+                </Field>
+                <Field label="Cédula o RIF" htmlFor="co-inv-tax">
+                  <Input
+                    id="co-inv-tax"
+                    value={fiscal.taxId}
+                    onChange={(e) => setFiscal({ ...fiscal, taxId: e.target.value })}
+                    placeholder="V-12345678"
+                    autoCapitalize="characters"
+                    maxLength={20}
+                  />
+                </Field>
+                <Field label="Dirección" htmlFor="co-inv-address" className="sm:col-span-2">
+                  <Input
+                    id="co-inv-address"
+                    value={fiscal.address}
+                    onChange={(e) => setFiscal({ ...fiscal, address: e.target.value })}
+                    maxLength={200}
+                  />
+                </Field>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {customerList ? (
           <Button
             variant="outline"

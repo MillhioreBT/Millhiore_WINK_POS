@@ -5,6 +5,10 @@
  * blanco a cada lado (`QUIET_ZONE` módulos) para que el lector lo encuentre.
  */
 
+import { eanCheckDigit } from "@millhiore/domain"
+
+export { eanCheckDigit }
+
 export type BarcodeFormat = "EAN13" | "UPCA" | "EAN8" | "CODE128"
 
 export interface Barcode {
@@ -49,16 +53,6 @@ const PARITY = [
 
 function flip(bit: string): string {
   return bit === "1" ? "0" : "1"
-}
-
-/** Dígito de control de EAN y UPC: pesos 3 y 1 alternados desde la derecha. */
-export function eanCheckDigit(digits: string): number {
-  let sum = 0
-  for (let i = 0; i < digits.length; i++) {
-    const d = Number(digits[digits.length - 1 - i])
-    sum += i % 2 === 0 ? d * 3 : d
-  }
-  return (10 - (sum % 10)) % 10
 }
 
 const validEan = (code: string, length: number) =>

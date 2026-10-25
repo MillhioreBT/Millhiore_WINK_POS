@@ -149,3 +149,28 @@ describe("migración de impuestos (0004)", () => {
     }
   })
 })
+
+describe("migración del catálogo en línea (0036)", () => {
+  test("los productos que ya existían salen en el catálogo, sin descripción ni foto", () => {
+    const folder = mkdtempSync(join(tmpdir(), "millhiore-mig-"))
+    try {
+      cpSync(join(import.meta.dir, "..", "drizzle"), folder, { recursive: true })
+      const journalPath = join(folder, "meta", "_journal.json")
+      const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: unknown[] }
+      journal.entries = journal.entries.slice(0, 36)
+      writeFileSync(journalPath, JSON.stringify(journal))
+
+      const old = createDb(":memory:")
+      migrate(old, { migrationsFolder: folder })
+      old.run(sql`insert into product (id, name, kind, tracks_stock, created_at)
+                  values ('p1', 'Pan', 'good', 1, 1)`)
+      migrateDb(old)
+      expect(
+        old.all(sql`select in_catalog as inCatalog, description from product where id = 'p1'`),
+      ).toEqual([{ inCatalog: 1, description: null }])
+      expect(old.all(sql`select count(*) as n from product_image`)).toEqual([{ n: 0 }])
+    } finally {
+      rmSync(folder, { recursive: true, force: true })
+    }
+  })
+})

@@ -1,0 +1,5 @@
+@import "tailwindcss";
+@import "@millhiore/ui/theme.css";
+
+/* Los componentes viven en packages/ui: Tailwind debe ver sus clases. */
+@source "../../../../packages/ui/src";

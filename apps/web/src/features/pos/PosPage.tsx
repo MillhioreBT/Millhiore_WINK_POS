@@ -1,4 +1,4 @@
-import type { CatalogItem } from "@millhiore/contracts"
+import type { CatalogItem, ProductUnit } from "@millhiore/contracts"
 import { lineTotal } from "@millhiore/domain"
 import {
   Button,
@@ -26,6 +26,7 @@ import {
   PercentIcon,
   PlayIcon,
   PlusIcon,
+  ShoppingBagIcon,
   ShoppingCartIcon,
   SquareMenuIcon,
   TicketPercentIcon,
@@ -36,7 +37,14 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 import { TerminalPicker } from "../../components/TerminalPicker"
-import { formatMoney, formatPercent, formatQty, formatTime } from "../../lib/format"
+import {
+  formatMoney,
+  formatPercent,
+  formatQty,
+  formatQtyUnit,
+  formatTime,
+  perUnit,
+} from "../../lib/format"
 import { stockAt } from "../../lib/locations"
 import { openDrawer } from "../../lib/printing"
 import {
@@ -63,21 +71,34 @@ import {
   lineKey,
   makeContext,
   type PosContext,
+  priceWithList,
+  unitPriceInDoc,
 } from "./compute"
 import { DiscountCodeDialog } from "./DiscountCodeDialog"
 import { DiscountDialog } from "./DiscountDialog"
 import { ModifierDialog, modifiersText } from "./ModifierDialog"
+import { OfflineSalesBanner } from "./OfflineSales"
+import { QuantityDialog } from "./QuantityDialog"
 import { type HeldTicket, type TicketLine, usePos } from "./store"
 
 /** Ventas aparcadas: cuánto suman hoy y con qué productos, para retomarlas o descartarlas. */
-function HeldDialog({ ctx, onClose }: { ctx: PosContext; onClose: () => void }) {
+function HeldDialog({
+  ctx,
+  defaultList,
+  onClose,
+}: {
+  ctx: PosContext
+  /** La lista de precios de la sucursal (la de una venta sin otra elegida). */
+  defaultList: string | null
+  onClose: () => void
+}) {
   const { held, resume, discardHeld, lines } = usePos()
   const total = (t: HeldTicket) =>
     buildCart(
       ctx,
       t.lines,
       t.saleDiscount ?? null,
-      t.priceListId ?? null,
+      t.priceListId ?? defaultList,
       t.charges ?? autoCharges(ctx),
     ).ticket.totalMinor
   return (
@@ -154,6 +175,8 @@ export function PosPage() {
     setCharges,
     quote,
     detachQuote,
+    order,
+    detachOrder,
     tab,
   } = usePos()
   const navigate = useNavigate()
@@ -170,6 +193,12 @@ export function PosPage() {
   const [discountFor, setDiscountFor] = useState<{ key: string | null } | null>(null)
   // Producto con opciones y extras: se eligen antes de agregarlo.
   const [choosing, setChoosing] = useState<CatalogItem | null>(null)
+  // Cuánto: un producto por peso que se agrega, o la cantidad de una línea que se cambia.
+  const [weighing, setWeighing] = useState<
+    | { item: CatalogItem }
+    | { key: string; name: string; unit: ProductUnit; qtyMilli: number; unitPriceMinor: number }
+    | null
+  >(null)
   const [heldOpen, setHeldOpen] = useState(false)
   const [checkoutOpen, setCheckoutOpen] = useState(false)
   const [receiptId, setReceiptId] = useState<string | null>(null)
@@ -184,6 +213,13 @@ export function PosPage() {
     () => (boot.data ? makeContext(boot.data, rate.data?.current?.value ?? null) : null),
     [boot.data, rate.data],
   )
+  // La lista de precios de la sucursal de esta caja es la de siempre allí: otra elegida (o la de
+  // un cliente) la reemplaza.
+  const branchList = boot.data?.features.branches
+    ? (boot.data.branches.find((b) => b.id === terminal?.branchId)?.priceListId ?? null)
+    : null
+  const defaultList = branchList && ctx?.priceLists.has(branchList) ? branchList : null
+  const listId = priceListId ?? defaultList
 
   // Recargos de la venta: los elegidos o, si no se ha tocado nada, los que se agregan solos.
   const activeCharges = useMemo(
@@ -192,8 +228,8 @@ export function PosPage() {
   )
   // Ticket en Bs con la tasa vigente. Una línea sin precio convertible bloquea el cobro.
   const cart = useMemo(
-    () => (ctx ? buildCart(ctx, lines, saleDiscountUsed, priceListId, activeCharges) : null),
-    [ctx, lines, saleDiscountUsed, priceListId, activeCharges],
+    () => (ctx ? buildCart(ctx, lines, saleDiscountUsed, listId, activeCharges) : null),
+    [ctx, lines, saleDiscountUsed, listId, activeCharges],
   )
   const toggleCharge = (chargeId: string) =>
     setCharges(
@@ -217,7 +253,7 @@ export function PosPage() {
     return () => window.removeEventListener("keydown", onKey)
   }, [canCharge])
 
-  const addItem = (item: CatalogItem) => {
+  const addItem = (item: CatalogItem, qtyMilli?: number) => {
     // Lo de una mesa se pide en la mesa: aquí solo se cobra.
     if (tab) {
       toast.info(`Para agregar productos, vuelve a ${tab.label}`)
@@ -228,7 +264,8 @@ export function PosPage() {
       toast.warning(`Lo que queda de ${item.name} está vencido: revisa antes de venderlo`)
     }
     if (features.modifiers && item.modifierGroupIds.length) setChoosing(item)
-    else add(item)
+    else if (qtyMilli === undefined && item.unit !== "unit") setWeighing({ item })
+    else add(item, qtyMilli)
   }
 
   if (!ctx || !cart || !boot.data || !terminal || !terminalId || shift.isPending) {
@@ -244,7 +281,12 @@ export function PosPage() {
   const ref = ctx.refCurrency
   const toRef = (minor: number) => convertMinor(ctx, minor, doc, ref)
   const busy =
-    checkoutOpen || dialog !== null || receiptId !== null || heldOpen || choosing !== null
+    checkoutOpen ||
+    dialog !== null ||
+    receiptId !== null ||
+    heldOpen ||
+    choosing !== null ||
+    weighing !== null
 
   return (
     <div
@@ -257,23 +299,26 @@ export function PosPage() {
       <CatalogPanel
         ctx={ctx}
         products={products.data}
-        priceListId={priceListId}
+        priceListId={listId}
         locationId={terminal.locationId}
         onAdd={addItem}
         paused={busy}
         searchRef={searchRef}
         banner={
-          !ctx.rate ? (
-            <div className="flex items-center gap-2 rounded-lg border border-warning/50 bg-warning/15 p-3 text-sm">
-              <TriangleAlertIcon className="size-4 shrink-0" />
-              No hay tasa del día: no se pueden convertir precios en divisas.
-              {can(me, "rate.manage") ? (
-                <Link to="/ajustes" className="font-medium underline">
-                  Cargar tasa
-                </Link>
-              ) : null}
-            </div>
-          ) : null
+          <>
+            <OfflineSalesBanner />
+            {!ctx.rate ? (
+              <div className="flex items-center gap-2 rounded-lg border border-warning/50 bg-warning/15 p-3 text-sm">
+                <TriangleAlertIcon className="size-4 shrink-0" />
+                No hay tasa del día: no se pueden convertir precios en divisas.
+                {can(me, "rate.manage") ? (
+                  <Link to="/ajustes" className="font-medium underline">
+                    Cargar tasa
+                  </Link>
+                ) : null}
+              </div>
+            ) : null}
+          </>
         }
       />
 
@@ -362,6 +407,20 @@ export function PosPage() {
             </Button>
           </div>
         ) : null}
+        {order ? (
+          <div className="flex flex-wrap items-center gap-2 border-b bg-primary/5 px-4 py-2 text-sm">
+            <ShoppingBagIcon className="size-4 shrink-0 text-primary" />
+            <span className="min-w-0 flex-1">
+              Pedido <span className="font-medium">{order.number}</span> · {order.customerName}
+              <span className="block text-muted-foreground text-xs">
+                Al cobrarlo queda atendido
+              </span>
+            </span>
+            <Button variant="ghost" size="sm" onClick={detachOrder}>
+              Quitar
+            </Button>
+          </div>
+        ) : null}
         {tab ? (
           <div className="flex flex-wrap items-center gap-2 border-b bg-primary/5 px-4 py-2 text-sm">
             <SquareMenuIcon className="size-4 shrink-0 text-primary" />
@@ -394,7 +453,11 @@ export function PosPage() {
               onChange={(e) => setPriceList(e.target.value || null)}
               className="h-8 w-auto min-w-40 py-1"
             >
-              <option value="">Normales</option>
+              <option value="">
+                {defaultList
+                  ? `${ctx.priceLists.get(defaultList)?.name ?? ""} (de la sucursal)`
+                  : "Normales"}
+              </option>
               {[...ctx.priceLists.values()].map((l) => (
                 <option key={l.id} value={l.id}>
                   {l.name}
@@ -432,7 +495,28 @@ export function PosPage() {
               </span>
               <span className="flex items-center gap-1">
                 {tab ? (
-                  <span className="tabular text-sm">{formatQty(l.qtyMilli)}</span>
+                  <span className="tabular text-sm">
+                    {formatQtyUnit(l.qtyMilli, lines[i]?.unit)}
+                  </span>
+                ) : lines[i]?.unit ? (
+                  // Por kilo, litro o metro: la cantidad se escribe (o se vuelve a pesar).
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="tabular h-8 px-2.5"
+                    onClick={() =>
+                      setWeighing({
+                        key: lineKey(l),
+                        name: l.name,
+                        unit: lines[i]?.unit ?? "kg",
+                        qtyMilli: l.qtyMilli,
+                        unitPriceMinor: l.unitPriceMinor,
+                      })
+                    }
+                    aria-label={`Cambiar cuánto lleva ${l.name}`}
+                  >
+                    {formatQtyUnit(l.qtyMilli, lines[i]?.unit)}
+                  </Button>
                 ) : (
                   <>
                     <Button
@@ -443,9 +527,23 @@ export function PosPage() {
                     >
                       <MinusIcon />
                     </Button>
-                    <span className="tabular w-10 text-center text-sm">
+                    <button
+                      type="button"
+                      className="tabular w-10 cursor-pointer rounded text-center text-sm hover:bg-accent"
+                      onClick={() =>
+                        setWeighing({
+                          key: lineKey(l),
+                          name: l.name,
+                          unit: "unit",
+                          qtyMilli: l.qtyMilli,
+                          unitPriceMinor: l.unitPriceMinor,
+                        })
+                      }
+                      aria-label={`Escribir cuántos lleva ${l.name}`}
+                      title="Escribir la cantidad"
+                    >
                       {formatQty(l.qtyMilli)}
-                    </span>
+                    </button>
                     <Button
                       variant="outline"
                       size="icon-sm"
@@ -458,6 +556,7 @@ export function PosPage() {
                 )}
                 <span className="tabular ml-2 text-muted-foreground text-xs">
                   × {formatMoney(l.unitPriceMinor, doc)}
+                  {perUnit(lines[i]?.unit)}
                 </span>
               </span>
               <span className="flex justify-self-end">
@@ -643,6 +742,10 @@ export function PosPage() {
             reset()
             setReceiptId(id)
           }}
+          onQueued={() => {
+            setCheckoutOpen(false)
+            reset()
+          }}
         />
       ) : null}
       {dialog === "cash" ? (
@@ -651,13 +754,15 @@ export function PosPage() {
       {dialog === "close" ? (
         <CloseShiftDialog boot={boot.data} shift={openShift} onClose={() => setDialog(null)} />
       ) : null}
-      {heldOpen ? <HeldDialog ctx={ctx} onClose={() => setHeldOpen(false)} /> : null}
+      {heldOpen ? (
+        <HeldDialog ctx={ctx} defaultList={defaultList} onClose={() => setHeldOpen(false)} />
+      ) : null}
       {savingQuote ? (
         <SaveQuoteDialog
           ctx={ctx}
           lines={lines}
           ticket={cart.ticket}
-          priceListId={priceListId}
+          priceListId={listId}
           saleDiscount={saleDiscountUsed}
           charges={activeCharges}
           initialContact={quote?.contact ?? null}
@@ -686,6 +791,30 @@ export function PosPage() {
           onClose={() => setEditingCharge(null)}
         />
       ) : null}
+      {weighing ? (
+        <QuantityDialog
+          ctx={ctx}
+          {...("item" in weighing
+            ? {
+                item: weighing.item,
+                unitPriceMinor: (() => {
+                  const p = priceWithList(ctx, listId, weighing.item.variantId, weighing.item)
+                  return unitPriceInDoc(ctx, p.priceMinor, p.priceCurrency)
+                })(),
+              }
+            : {
+                item: weighing,
+                unitPriceMinor: weighing.unitPriceMinor,
+                initialQtyMilli: weighing.qtyMilli,
+              })}
+          onClose={() => setWeighing(null)}
+          onConfirm={(qtyMilli) => {
+            if ("item" in weighing) add(weighing.item, qtyMilli)
+            else setQty(weighing.key, qtyMilli)
+            setWeighing(null)
+          }}
+        />
+      ) : null}
       {choosing ? (
         <ModifierDialog
           item={choosing}
@@ -703,7 +832,7 @@ export function PosPage() {
           ctx={ctx}
           lines={lines}
           cartLines={cart.lines}
-          priceListId={priceListId}
+          priceListId={listId}
           saleDiscount={saleDiscount}
           target={discountFor.key}
           onLine={setLineDiscount}

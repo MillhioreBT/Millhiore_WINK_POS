@@ -23,8 +23,10 @@ const DISMISSED_KEY = "onboarding.dismissed"
 
 /**
  * Lo que ya existía, encendido mientras el comercio no diga otra cosa (así funcionaban antes de
- * poder apagarlas); varias ubicaciones, lotes, tallas y colores, mesas y opciones, apagadas: la
- * mayoría vende de un solo sitio, no lleva vencimientos, no vende ropa ni atiende mesas.
+ * poder apagarlas); varias ubicaciones, lotes, tallas y colores, mesas, opciones, balanza y
+ * sucursales, apagadas: la mayoría vende de un solo sitio, no lleva vencimientos, no vende ropa,
+ * no atiende mesas, no pesa en una balanza ni tiene otro local. El catálogo en línea también:
+ * publicar los precios lo decide cada negocio.
  */
 const DEFAULT_FEATURES: Features = {
   quotes: true,
@@ -40,6 +42,9 @@ const DEFAULT_FEATURES: Features = {
   kitchen: false,
   recipes: false,
   tips: false,
+  scale: false,
+  branches: false,
+  catalog: false,
 }
 
 export function features(db: Pick<Db, "select">): Features {
@@ -55,10 +60,13 @@ export function updateFeatures(
   return db.transaction(
     (tx) => {
       const before = features(tx)
-      const after = {
+      const after: Features = {
         ...before,
         ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
       }
+      // Cada sucursal tiene sus ubicaciones y sus cajas: sin varias ubicaciones no hay sucursales.
+      if (patch.branches) after.locations = true
+      if (patch.locations === false) after.branches = false
       writeSetting(tx, FEATURES_KEY, after)
       tx.insert(auditLog)
         .values({

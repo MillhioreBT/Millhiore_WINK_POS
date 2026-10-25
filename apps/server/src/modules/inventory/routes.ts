@@ -138,10 +138,14 @@ export function registerInventoryRoutes(app: App, deps: AppDeps): void {
   })
 
   app.openapi(adjustmentsRoute, (c) => {
-    const { permissions } = actorOf(c)
+    const { permissions, branchIds } = actorOf(c)
     checkView(permissions)
     return c.json(
-      listAdjustments(deps.db, { ...c.req.valid("query"), seeCost: permissions.has("cost.view") }),
+      listAdjustments(deps.db, {
+        ...c.req.valid("query"),
+        seeCost: permissions.has("cost.view"),
+        branchIds: branchIds ? [...branchIds] : null,
+      }),
       200,
     )
   })

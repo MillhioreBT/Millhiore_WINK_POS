@@ -27,6 +27,9 @@ describe("funciones activables", () => {
       kitchen: false,
       recipes: false,
       tips: false,
+      scale: false,
+      branches: false,
+      catalog: false,
     })
     const res = await h.call("/api/settings/features", {
       method: "PUT",

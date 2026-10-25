@@ -92,8 +92,12 @@ export type PostingErrorCode =
   | "HAS_RETURNS"
   | "HAS_PAYMENTS"
   | "QUOTE_CLOSED"
+  | "ORDER_CLOSED"
+  | "OTHER_SERVER"
   | "DISCOUNT_DENIED"
   | "TAB_CHANGED"
+  | "OTHER_BRANCH"
+  | "CUSTOMER_REQUIRED"
 
 export class PostingError extends Error {
   constructor(

@@ -13,6 +13,7 @@ import {
   lot,
   lotBalance,
   product,
+  productImage,
   stockBalance,
   tax,
   variant,
@@ -44,8 +45,10 @@ const itemColumns = {
   optionValues: variant.optionValues,
   options: product.options,
   kind: product.kind,
+  unit: product.unit,
   sku: variant.sku,
   barcode: variant.barcode,
+  plu: variant.plu,
   priceMinor: variant.priceMinor,
   priceCurrency: variant.priceCurrency,
   taxId: product.taxId,
@@ -216,12 +219,21 @@ export function productDetail(db: Db | Tx, productId: string, now: number): Prod
     productId: p.id,
     name: p.name,
     kind: p.kind,
+    unit: p.unit,
     taxId: p.taxId,
     categoryId: p.categoryId,
     tracksStock: p.tracksStock,
     tracksLots: p.tracksLots,
     active: p.active,
     options: p.options,
+    description: p.description,
+    inCatalog: p.inCatalog,
+    imageVersion:
+      db
+        .select({ v: productImage.updatedAt })
+        .from(productImage)
+        .where(eq(productImage.productId, productId))
+        .get()?.v ?? null,
     variants: withStock(db, selectRows(db, eq(product.id, productId)), now),
     recipe: recipeOf(db, productId),
   }
@@ -239,7 +251,13 @@ function itemById(db: Db | Tx, productId: string, now = Date.now()): CatalogItem
 /** Lo que queda en la bitácora: el producto o, si tiene tallas y colores, con todas ellas. */
 function snapshot(db: Db | Tx, productId: string, now: number): unknown {
   const detail = productDetail(db, productId, now)
-  return detail.options ? detail : itemById(db, productId, now)
+  return detail.options
+    ? detail
+    : {
+        ...itemById(db, productId, now),
+        description: detail.description,
+        inCatalog: detail.inCatalog,
+      }
 }
 
 function checkReferences(
@@ -283,7 +301,11 @@ function nextVariantSku(tx: Tx, base: string, taken: Set<string>): string {
 function duplicateCode(e: unknown): never {
   const text = String((e as Error).cause ?? (e as Error).message)
   if (/UNIQUE/i.test(text)) {
-    const field = /barcode/.test(text) ? "código de barras" : "SKU"
+    const field = /barcode/.test(text)
+      ? "código de barras"
+      : /plu/.test(text)
+        ? "código de balanza"
+        : "SKU"
     throw new HttpError(409, "DUPLICATE_CODE", `Ya existe otro producto con ese ${field}`)
   }
   throw e
@@ -359,6 +381,7 @@ export function createProduct(
         if (input.barcode) {
           throw invalidOptions("Cada combinación lleva su propio código de barras")
         }
+        if (input.plu) throw invalidOptions("Un producto con tallas o colores no va en la balanza")
       } else if (input.variants?.length) {
         throw invalidOptions("Para crear combinaciones, indica las tallas, colores…")
       }
@@ -377,6 +400,7 @@ export function createProduct(
               values: [] as string[],
               sku: input.sku,
               barcode: input.barcode,
+              plu: input.plu,
               priceMinor: input.priceMinor,
               active: true,
               id: undefined,
@@ -394,11 +418,14 @@ export function createProduct(
             id: productId,
             name: input.name,
             kind: input.kind,
+            unit: input.unit,
             tracksStock: input.kind === "good",
             tracksLots: input.kind === "good" && input.tracksLots,
             taxId: input.taxId ?? null,
             categoryId: input.categoryId ?? null,
             options,
+            description: input.description?.trim() || null,
+            inCatalog: input.inCatalog ?? true,
             createdAt: now,
           })
           .run()
@@ -413,6 +440,7 @@ export function createProduct(
               productId,
               sku: v.sku ?? (base ? nextVariantSku(tx, base, taken) : nextSku(tx)),
               barcode: v.barcode ?? null,
+              plu: "plu" in v ? (v.plu ?? null) : null,
               name: variantName(input.name, options ? v.values : null),
               optionValues: options ? v.values : null,
               priceMinor: v.priceMinor,
@@ -437,8 +465,8 @@ export function createProduct(
         }
       }
       const item = itemById(tx, productId, now)
-      const data = options ? productDetail(tx, productId, now) : item
-      audit(tx, actorId, now, "product.created", productId, { ...data, listPrices })
+      const data = snapshot(tx, productId, now)
+      audit(tx, actorId, now, "product.created", productId, { ...(data as object), listPrices })
       return item
     },
     { behavior: "immediate" },
@@ -480,6 +508,7 @@ export function updateProduct(
         if (patch.sku !== undefined || patch.barcode) {
           throw invalidOptions("Cada combinación lleva su propio código")
         }
+        if (patch.plu) throw invalidOptions("Un producto con tallas o colores no va en la balanza")
       }
       const name = patch.name ?? current.name
       const existing = tx.select().from(variant).where(eq(variant.productId, productId)).all()
@@ -488,10 +517,15 @@ export function updateProduct(
       const productSet = {
         ...(patch.tracksLots !== undefined ? { tracksLots: patch.tracksLots } : {}),
         ...(patch.name !== undefined ? { name: patch.name } : {}),
+        ...(patch.unit !== undefined ? { unit: patch.unit } : {}),
         ...(patch.taxId !== undefined ? { taxId: patch.taxId } : {}),
         ...(patch.categoryId !== undefined ? { categoryId: patch.categoryId } : {}),
         ...(patch.active !== undefined ? { active: patch.active } : {}),
         ...(replacing ? { options } : {}),
+        ...(patch.description !== undefined
+          ? { description: patch.description?.trim() || null }
+          : {}),
+        ...(patch.inCatalog !== undefined ? { inCatalog: patch.inCatalog } : {}),
       }
       // Lo que vale para todas las variantes del producto.
       const shared = {
@@ -618,6 +652,7 @@ function editSingle(
     ...(patch.name !== undefined ? { name: patch.name } : {}),
     ...(patch.sku !== undefined ? { sku: patch.sku } : {}),
     ...(patch.barcode !== undefined ? { barcode: patch.barcode } : {}),
+    ...(patch.plu !== undefined ? { plu: patch.plu } : {}),
     ...(patch.priceMinor !== undefined ? { priceMinor: patch.priceMinor } : {}),
     ...(patch.active !== undefined ? { active: patch.active } : {}),
   }

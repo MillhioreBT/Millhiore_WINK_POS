@@ -29,6 +29,7 @@ import {
 } from "@millhiore/domain"
 import { and, asc, eq, gte, inArray, lt, type SQLWrapper, sql } from "drizzle-orm"
 import { HttpError } from "../../http/errors"
+import { inBranches } from "../branches/service"
 import { features } from "../features/routes"
 import { listAdjustments } from "../inventory/service"
 import { expiryCounts } from "../lots/routes"
@@ -50,25 +51,36 @@ function loadBook(db: Db): CurrencyBook {
 const signed = (col: SQLWrapper) =>
   sql<number>`case when ${document.type} = 'RETURN' then -${col} else ${col} end`
 
+type Branches = readonly string[] | null
+
 /** Ventas y devoluciones de un rango (las devoluciones se restan de las ventas). */
-const salesIn = (from: number, to: number) =>
+const salesIn = (from: number, to: number, branches: Branches) =>
   and(
     inArray(document.type, ["SALE", "RETURN"]),
     gte(document.postedAt, from),
     lt(document.postedAt, to),
+    inBranches(document.locationId, branches),
   )
 
 /** Lo que movió dinero con clientes: ventas cobradas, abonos y reembolsos de devoluciones. */
-const takingsIn = (from: number, to: number) =>
+const takingsIn = (from: number, to: number, branches: Branches) =>
   and(
     inArray(document.type, ["SALE", "PAYMENT_IN", "RETURN"]),
     gte(document.postedAt, from),
     lt(document.postedAt, to),
+    inBranches(document.locationId, branches),
   )
 
 /** Cifras de ventas de un rango: totales legales y su equivalente en la moneda de referencia. */
-function salesFigures(db: Db, biz: Business, book: CurrencyBook, from: number, to: number) {
-  const where = salesIn(from, to)
+function salesFigures(
+  db: Db,
+  biz: Business,
+  book: CurrencyBook,
+  from: number,
+  to: number,
+  branches: Branches,
+) {
+  const where = salesIn(from, to, branches)
   const totals = db
     .select({
       count: sql<number>`count(case when ${document.type} = 'SALE' and ${document.reversesDocumentId} is null then 1 end)`,
@@ -141,7 +153,14 @@ function salesFigures(db: Db, biz: Business, book: CurrencyBook, from: number, t
  */
 export function daySummary(
   db: Db,
-  opts: { date?: string | undefined; now: number; includeStock: boolean; seeCost: boolean },
+  opts: {
+    date?: string | undefined
+    now: number
+    includeStock: boolean
+    seeCost: boolean
+    /** Solo lo de estas sucursales; null, todas. */
+    branchIds?: Branches | undefined
+  },
 ): DaySummary {
   const biz = db.select().from(business).get()
   if (!biz) throw new HttpError(409, "NOT_CONFIGURED", "El negocio aún no está configurado")
@@ -151,7 +170,9 @@ export function daySummary(
   const { from, to } = dayRange(date, tz)
   const yesterday = dayRange(addDays(date, -1), tz)
   const book = loadBook(db)
-  const where = salesIn(from, to)
+  const branches = opts.branchIds ?? null
+  const where = salesIn(from, to, branches)
+  const here = inBranches(document.locationId, branches)
 
   const byMethod = db
     .select({
@@ -164,7 +185,7 @@ export function daySummary(
     .from(payment)
     .innerJoin(document, eq(document.id, payment.documentId))
     .innerJoin(paymentMethod, eq(paymentMethod.id, payment.paymentMethodId))
-    .where(takingsIn(from, to))
+    .where(takingsIn(from, to, branches))
     .groupBy(payment.paymentMethodId, payment.currency)
     .all()
     .filter((m) => m.amountMinor !== 0)
@@ -253,6 +274,7 @@ export function daySummary(
         inArray(document.type, ["PURCHASE", "PURCHASE_RETURN"]),
         gte(document.postedAt, from),
         lt(document.postedAt, to),
+        here,
       ),
     )
     .get()
@@ -264,7 +286,12 @@ export function daySummary(
     })
     .from(document)
     .where(
-      and(eq(document.type, "PAYMENT_IN"), gte(document.postedAt, from), lt(document.postedAt, to)),
+      and(
+        eq(document.type, "PAYMENT_IN"),
+        gte(document.postedAt, from),
+        lt(document.postedAt, to),
+        here,
+      ),
     )
     .get()
 
@@ -276,7 +303,12 @@ export function daySummary(
     })
     .from(document)
     .where(
-      and(eq(document.type, "EXPENSE"), gte(document.postedAt, from), lt(document.postedAt, to)),
+      and(
+        eq(document.type, "EXPENSE"),
+        gte(document.postedAt, from),
+        lt(document.postedAt, to),
+        here,
+      ),
     )
     .get()
 
@@ -290,7 +322,7 @@ export function daySummary(
     .from(cashShift)
     .innerJoin(terminal, eq(terminal.id, cashShift.terminalId))
     .leftJoin(user, eq(user.id, cashShift.openedBy))
-    .where(eq(cashShift.status, "open"))
+    .where(and(eq(cashShift.status, "open"), inBranches(terminal.locationId, branches)))
     .orderBy(asc(terminal.name))
     .all()
 
@@ -300,8 +332,8 @@ export function daySummary(
     to,
     legalCurrency: biz.legalCurrency,
     referenceCurrency: biz.referenceCurrency,
-    sales: salesFigures(db, biz, book, from, to),
-    previous: salesFigures(db, biz, book, yesterday.from, yesterday.to),
+    sales: salesFigures(db, biz, book, from, to, branches),
+    previous: salesFigures(db, biz, book, yesterday.from, yesterday.to, branches),
     byMethod,
     byHour: [...hours.values()].sort((a, b) => a.hour - b.hour),
     topProducts: [...products.values()]
@@ -320,23 +352,27 @@ export function daySummary(
       count: expenses?.count ?? 0,
       totalLegalMinor: expenses?.totalLegalMinor ?? 0,
     },
-    inventoryLossLegalMinor: opts.seeCost ? inventoryLoss(db, from, to) : null,
+    inventoryLossLegalMinor: opts.seeCost ? inventoryLoss(db, from, to, branches) : null,
     expiry: opts.includeStock && features(db).lots ? expiryCounts(db, opts.now) : null,
     openShifts,
-    lowStock: opts.includeStock ? lowStock(db) : null,
+    lowStock: opts.includeStock ? lowStock(db, branches) : null,
   }
 }
 
 /** Salidas por ajuste (merma, vencido, uso interno…) menos entradas por ajuste, a costo. */
-function inventoryLoss(db: Db, from: number, to: number): number {
-  const a = listAdjustments(db, { from, to, limit: 1, seeCost: true })
+function inventoryLoss(db: Db, from: number, to: number, branchIds: Branches): number {
+  const a = listAdjustments(db, { from, to, limit: 1, seeCost: true, branchIds })
   return (a.outLegalMinor ?? 0) - (a.inLegalMinor ?? 0)
 }
 
-/** Productos activos que llevan existencia y están agotados o por debajo de su mínimo. */
-export function lowStock(db: Db): NonNullable<DaySummary["lowStock"]> {
+/**
+ * Productos activos que llevan existencia y están agotados o por debajo de su mínimo (con
+ * `branchIds`, contando lo que hay en esas sucursales).
+ */
+export function lowStock(db: Db, branchIds: Branches = null): NonNullable<DaySummary["lowStock"]> {
+  const branches = inBranches(stockBalance.locationId, branchIds)
   const stock = sql<number>`coalesce((select sum(${stockBalance.qtyMilli}) from ${stockBalance}
-    where ${stockBalance.variantId} = ${variant.id}), 0)`
+    where ${stockBalance.variantId} = ${variant.id}${branches ? sql` and ${branches}` : sql``}), 0)`
   return db
     .select({
       productId: product.id,

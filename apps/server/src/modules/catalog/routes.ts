@@ -12,7 +12,9 @@ import {
 import { actorOf, requirePermission } from "../../http/actor"
 import type { App, AppDeps } from "../../http/context"
 import { forbidden } from "../../http/errors"
+import { locationsIn } from "../branches/service"
 import { registerCategoryRoutes } from "./categories"
+import { registerProductImageRoutes } from "./images"
 import { registerModifierRoutes } from "./modifiers"
 import { registerPriceListRoutes } from "./priceLists"
 import { bulkReprice } from "./pricing"
@@ -97,6 +99,20 @@ const bulkPriceRoute = createRoute({
   },
 })
 
+/** Quien trabaja en algunas sucursales ve la existencia de sus ubicaciones, no la de las demás. */
+function onlyAt<T extends CatalogItem>(item: T, here: ReadonlySet<string> | null): T {
+  if (!here) return item
+  const keep = (byLocation: Record<string, number>) =>
+    Object.fromEntries(Object.entries(byLocation).filter(([id]) => here.has(id)))
+  return {
+    ...item,
+    stockByLocation: keep(item.stockByLocation),
+    expiry: item.expiry
+      ? { ...item.expiry, expiredByLocation: keep(item.expiry.expiredByLocation) }
+      : item.expiry,
+  }
+}
+
 /** El costo solo lo ve quien tiene cost.view (el cajero no debe ver el margen). */
 function withCost<T extends CatalogItem>(item: T, permissions: ReadonlySet<string>): T {
   return permissions.has("cost.view") ? item : { ...item, costMinor: null, costCurrency: null }
@@ -106,6 +122,7 @@ export function registerCatalogRoutes(app: App, deps: AppDeps): void {
   registerCategoryRoutes(app, deps)
   registerPriceListRoutes(app, deps)
   registerModifierRoutes(app, deps)
+  registerProductImageRoutes(app, deps)
 
   app.openapi(listRoute, (c) => {
     const actor = actorOf(c)
@@ -115,8 +132,9 @@ export function registerCatalogRoutes(app: App, deps: AppDeps): void {
       includeInactive: q.all === "true",
       now: deps.now(),
     })
+    const here = locationsIn(deps.db, actor.branchIds)
     return c.json(
-      items.map((i) => withCost(i, actor.permissions)),
+      items.map((i) => withCost(onlyAt(i, here), actor.permissions)),
       200,
     )
   })
@@ -128,7 +146,9 @@ export function registerCatalogRoutes(app: App, deps: AppDeps): void {
     return c.json(
       {
         ...detail,
-        variants: detail.variants.map((v) => withCost(v, actor.permissions)),
+        variants: detail.variants.map((v) =>
+          withCost(onlyAt(v, locationsIn(deps.db, actor.branchIds)), actor.permissions),
+        ),
         recipe: costs
           ? detail.recipe
           : detail.recipe.map((r) => ({ ...r, costMinor: null, costCurrency: null })),

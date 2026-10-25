@@ -1,8 +1,10 @@
 import {
+  API_KEY_PERMISSIONS,
   isUuidv7,
   MAX_OPTIONS,
   MAX_VARIANTS,
   POSTABLE_TYPES,
+  PRODUCT_UNITS,
   RECURRENCE_FREQUENCIES,
   TAX_KINDS,
   TAXPAYER_TYPES,
@@ -72,6 +74,14 @@ export const postPaymentSchema = z.object({
   reference: z.string().max(100).nullish(),
 })
 
+/** Nombre o razón social, cédula o RIF y dirección de quien compra (o vende, en una compra). */
+export const customerFiscalSchema = z.object({
+  name: z.string().trim().min(1, "Escribe el nombre o la razón social").max(120),
+  taxId: z.string().trim().min(1, "Escribe la cédula o el RIF").max(20),
+  address: z.string().trim().max(200).nullish(),
+})
+export type CustomerFiscal = z.infer<typeof customerFiscalSchema>
+
 export const postDocumentSchema = z.object({
   id: uuidv7Schema,
   type: z.enum(POSTABLE_TYPES),
@@ -88,6 +98,16 @@ export const postDocumentSchema = z.object({
   pricesIncludeTax: z.boolean().optional(),
   /** Cliente (venta) o proveedor (compra). */
   contactId: z.string().min(1).nullish(),
+  /**
+   * Los datos fiscales del cliente para este documento, escritos en la caja (si faltan, los del
+   * contacto). Quedan en el documento tal como se registraron.
+   */
+  customer: customerFiscalSchema.nullish(),
+  /**
+   * Venta con factura (no solo nota de venta): exige el nombre y la cédula o el RIF del cliente.
+   * La emite el medio autorizado; sus números se anotan después.
+   */
+  invoice: z.boolean().default(false),
   /**
    * Venta: la propina que deja el cliente, en la moneda del documento. No suma al total ni lleva
    * IVA ni IGTF: los pagos la cubren además de la venta.
@@ -130,6 +150,8 @@ export const postDocumentSchema = z.object({
     .default([]),
   /** Venta que sale de una cotización abierta: queda convertida en la misma operación. */
   quoteId: z.string().min(1).nullish(),
+  /** Venta que cobra un pedido del catálogo en línea: queda atendido en la misma operación. */
+  webOrderId: z.string().min(1).nullish(),
   /**
    * Compra, ajuste o traslado: la ubicación cuya existencia cambia (en el traslado, el origen). Si
    * falta, la de la caja; las ventas y devoluciones usan siempre la de su caja.
@@ -157,6 +179,23 @@ export const postDocumentSchema = z.object({
     .nullish(),
 })
 export type PostDocumentBody = z.infer<typeof postDocumentSchema>
+
+/** Los números de la factura emitida por el medio autorizado (máquina fiscal, forma libre…). */
+export const recordInvoiceSchema = z.object({
+  invoiceNumber: z
+    .string()
+    .trim()
+    .min(1, "Escribe el número de la factura")
+    .max(30)
+    .transform((s) => s.toUpperCase()),
+  controlNumber: z
+    .string()
+    .trim()
+    .min(1, "Escribe el número de control")
+    .max(30)
+    .transform((s) => s.toUpperCase()),
+})
+export type RecordInvoiceBody = z.infer<typeof recordInvoiceSchema>
 
 export const voidDocumentSchema = z.object({
   reversalId: uuidv7Schema,
@@ -216,6 +255,11 @@ export const fiscalSettingsSchema = z.object({
   pricesIncludeTax: z.boolean(),
   /** IVA de los productos sin uno asignado. */
   defaultTaxId: z.string().min(1),
+  /**
+   * La caja ofrece «Con factura» (pide los datos fiscales del cliente) y Ventas lleva la cuenta de
+   * las facturas por anotar. Apagado, todo sale como nota de venta.
+   */
+  invoices: z.boolean(),
 })
 export type FiscalSettingsBody = z.infer<typeof fiscalSettingsSchema>
 
@@ -274,6 +318,31 @@ export const surchargeSchema = z.object({
 
 export const productKindSchema = z.enum(["good", "service"])
 
+/** Por unidad, o por kilo, litro o metro (se vende con decimales y el precio es por kilo…). */
+export const productUnitSchema = z.enum(PRODUCT_UNITS)
+export type ProductUnit = z.infer<typeof productUnitSchema>
+
+/** Código del producto en la balanza que imprime etiquetas (PLU). */
+const pluSchema = safeInt
+  .min(1, "El código de la balanza va de 1 a 999999")
+  .max(999_999, "El código de la balanza va de 1 a 999999")
+
+/** Cómo se leen las etiquetas que imprime la balanza (EAN-13 de uso interno, 20 a 29). */
+export const scaleSettingsSchema = z.object({
+  /** Los dos primeros dígitos de sus códigos. */
+  prefixes: z
+    .array(z.string().regex(/^2\d$/, "Los prefijos van del 20 al 29"))
+    .min(1, "Elige al menos un prefijo")
+    .max(10),
+  /** Dígitos del código del producto (PLU); los que quedan, hasta el de control, son el valor. */
+  pluDigits: z.number().int().min(4).max(6),
+  /** Lo que trae el código después del PLU: el peso en gramos o el precio en céntimos. */
+  value: z.enum(["weight", "price"]),
+  /** Moneda del precio que trae la etiqueta, si trae el precio. */
+  priceCurrency: currencyCodeSchema,
+})
+export type ScaleSettings = z.infer<typeof scaleSettingsSchema>
+
 const optionValueSchema = z.string().trim().min(1, "Escribe el valor").max(30)
 
 /** Una característica (Talla) con sus valores en el orden en que se muestran (S, M, L). */
@@ -295,8 +364,12 @@ export const catalogItemSchema = z.object({
   /** Las características del producto con sus valores; null si se vende de una sola forma. */
   options: z.array(productOptionSchema).nullable(),
   kind: productKindSchema,
+  /** Por unidad o por kilo, litro o metro: el precio es por esa unidad. */
+  unit: productUnitSchema,
   sku: z.string(),
   barcode: z.string().nullable(),
+  /** Código en la balanza; null si no se pesa en una. */
+  plu: safeInt.nullable(),
   priceMinor: safeInt,
   priceCurrency: z.string(),
   /** null = el impuesto por defecto del negocio. */
@@ -366,9 +439,12 @@ export type RecipeInput = z.infer<typeof recipeInputSchema>
 export const createProductSchema = z.object({
   name: z.string().trim().min(1, "Escribe el nombre").max(120),
   kind: productKindSchema.default("good"),
+  unit: productUnitSchema.default("unit"),
   /** Si falta, se genera uno. */
   sku: z.string().trim().min(1).max(40).optional(),
   barcode: z.string().trim().min(1).max(40).nullish(),
+  /** Código en la balanza (solo sin tallas ni colores). */
+  plu: pluSchema.nullish(),
   priceMinor: safeInt.min(0, "El precio no puede ser negativo"),
   priceCurrency: currencyCodeSchema,
   /** null o ausente = el impuesto por defecto. */
@@ -388,13 +464,19 @@ export const createProductSchema = z.object({
   modifierGroupIds: z.array(z.string().min(1)).max(20).optional(),
   /** Receta: los ingredientes (productos con existencia) de una unidad. */
   recipe: z.array(recipeInputSchema).max(50).optional(),
+  /** Para el catálogo en línea: de qué es, cuánto trae. */
+  description: z.string().trim().max(500).nullish(),
+  /** Sale en el catálogo en línea (si su categoría también sale). */
+  inCatalog: z.boolean().optional(),
 })
 export type CreateProductBody = z.infer<typeof createProductSchema>
 
 export const updateProductSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
+  unit: productUnitSchema.optional(),
   sku: z.string().trim().min(1).max(40).optional(),
   barcode: z.string().trim().min(1).max(40).nullish(),
+  plu: pluSchema.nullish(),
   priceMinor: safeInt.min(0).optional(),
   priceCurrency: currencyCodeSchema.optional(),
   taxId: z.string().min(1).nullish(),
@@ -414,6 +496,10 @@ export const updateProductSchema = z.object({
   modifierGroupIds: z.array(z.string().min(1)).max(20).optional(),
   /** Receta (reemplaza la que tenía; vacía = sin receta). */
   recipe: z.array(recipeInputSchema).max(50).optional(),
+  /** Para el catálogo en línea: de qué es, cuánto trae. */
+  description: z.string().trim().max(500).nullish(),
+  /** Sale en el catálogo en línea (si su categoría también sale). */
+  inCatalog: z.boolean().optional(),
 })
 export type UpdateProductBody = z.infer<typeof updateProductSchema>
 
@@ -422,12 +508,17 @@ export const productDetailSchema = z.object({
   productId: z.string(),
   name: z.string(),
   kind: productKindSchema,
+  unit: productUnitSchema,
   taxId: z.string().nullable(),
   categoryId: z.string().nullable(),
   tracksStock: z.boolean(),
   tracksLots: z.boolean(),
   active: z.boolean(),
   options: z.array(productOptionSchema).nullable(),
+  description: z.string().nullable(),
+  inCatalog: z.boolean(),
+  /** Versión de la foto (cambia con cada foto nueva); null si no tiene. */
+  imageVersion: safeInt.nullable(),
   variants: z.array(catalogItemSchema.extend({ variantActive: z.boolean() })),
   /** Los ingredientes de una unidad, en su orden, con el nombre y el costo de hoy de cada uno. */
   recipe: z.array(
@@ -483,18 +574,38 @@ export const bootstrapSchema = z.object({
     phone: z.string().nullable(),
     receiptFooter: z.string().nullable(),
   }),
-  /** Cajas activas: cada equipo elige en cuál trabaja (la primera si no eligió). */
+  /**
+   * Cajas activas donde puede trabajar quien entró (las de sus sucursales): cada equipo elige en
+   * cuál trabaja (la primera si no eligió).
+   */
   terminals: z.array(
-    z.object({ id: z.string(), code: z.string(), name: z.string(), locationId: z.string() }),
+    z.object({
+      id: z.string(),
+      code: z.string(),
+      name: z.string(),
+      locationId: z.string(),
+      branchId: z.string(),
+    }),
+  ),
+  /** Sucursales activas, con lo que sale en el recibo y la lista de precios con que venden. */
+  branches: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      address: z.string().nullable(),
+      phone: z.string().nullable(),
+      priceListId: z.string().nullable(),
+    }),
   ),
   /** Cuántos códigos de descuento activos hay (la caja ofrece «Código de descuento» si hay). */
   discountCodes: safeInt,
-  /** Ubicaciones activas (tienda, depósito, cocina…), la tienda primero. */
+  /** Ubicaciones activas (tienda, depósito, cocina…), la tienda primero, de todas las sucursales. */
   locations: z.array(
     z.object({
       id: z.string(),
       name: z.string(),
       kind: z.enum(["store", "warehouse", "kitchen"]),
+      branchId: z.string(),
     }),
   ),
   currencies: z.array(
@@ -519,7 +630,12 @@ export const bootstrapSchema = z.object({
     kitchen: z.boolean(),
     recipes: z.boolean(),
     tips: z.boolean(),
+    scale: z.boolean(),
+    branches: z.boolean(),
+    catalog: z.boolean(),
   }),
+  /** Cómo se leen las etiquetas de la balanza; null si la función está apagada. */
+  scale: scaleSettingsSchema.nullable(),
   /** Los usuarios activos, para elegir a quién va una propina. */
   staff: z.array(z.object({ id: z.string(), name: z.string() })),
   /** Grupos de opciones y extras activos, con sus opciones activas, en su orden. */
@@ -559,6 +675,11 @@ export const bootstrapSchema = z.object({
     autoPrint: true,
     openDrawer: true,
   }),
+  /**
+   * Si esta PC es el servidor de una sucursal: su central (allá se cambian el catálogo, los
+   * usuarios y los ajustes del negocio). Null en un servidor solo o en el central.
+   */
+  central: z.object({ branchName: z.string(), url: z.string() }).nullable(),
 })
 export type Bootstrap = z.infer<typeof bootstrapSchema>
 
@@ -808,8 +929,15 @@ export const documentSummarySchema = z.object({
   reversedBy: z.string().nullable(),
   createdBy: z.string().nullable(),
   contactId: z.string().nullable(),
+  /** Los datos fiscales del cliente tal como quedaron en el documento (o, si es viejo, los de hoy). */
   contactName: z.string().nullable(),
   contactTaxId: z.string().nullable(),
+  contactAddress: z.string().nullable(),
+  /** Venta con factura; `invoice`, sus números si ya se anotaron. */
+  invoiceRequested: z.boolean(),
+  invoice: z
+    .object({ invoiceNumber: z.string(), controlNumber: z.string(), recordedAt: safeInt })
+    .nullable(),
   externalRef: z.string().nullable(),
   note: z.string().nullable(),
   /** Σ descuentos de las líneas, en la moneda del documento (negativo en el reverso). */
@@ -845,6 +973,18 @@ export const documentSummarySchema = z.object({
   toLocationName: z.string().nullable(),
   /** Venta con código de descuento: el código. */
   discountCode: z.string().nullable(),
+  /**
+   * Sucursal de la ubicación (con las sucursales activadas; si no, null), con lo que sale en el
+   * recibo: su dirección y su teléfono, si los tiene.
+   */
+  branch: z
+    .object({
+      id: z.string(),
+      name: z.string(),
+      address: z.string().nullable(),
+      phone: z.string().nullable(),
+    })
+    .nullable(),
 })
 export type DocumentSummary = z.infer<typeof documentSummarySchema>
 
@@ -869,6 +1009,8 @@ export const documentDetailSchema = documentSummarySchema.extend({
       lineNo: safeInt,
       variantId: z.string(),
       name: z.string(),
+      /** Por unidad o por kilo, litro o metro (el de hoy del producto). */
+      unit: productUnitSchema,
       qtyMilli: safeInt,
       unitPriceMinor: safeInt,
       /** Descuento de la línea, ya restado de `lineTotalMinor`. */
@@ -988,6 +1130,8 @@ export const createUserSchema = z.object({
   username: usernameSchema,
   password: passwordSchema,
   roleId: z.string().min(1),
+  /** Sucursales donde trabaja; vacío o null, en todas. */
+  branchIds: z.array(z.string().min(1)).nullish(),
 })
 export type CreateUserBody = z.infer<typeof createUserSchema>
 
@@ -1003,6 +1147,8 @@ export const meSchema = z.object({
   mustChangePassword: z.boolean(),
   /** Tiene un PIN de caja: puede bloquear la pantalla y desbloquearla con él. */
   hasPin: z.boolean(),
+  /** Sucursales donde trabaja; null, en todas (o las sucursales están apagadas). */
+  branchIds: z.array(z.string()).nullable(),
 })
 export type Me = z.infer<typeof meSchema>
 
@@ -1013,6 +1159,8 @@ export const userRowSchema = z.object({
   roleId: z.string().nullable(),
   active: z.boolean(),
   mustChangePassword: z.boolean(),
+  /** Sucursales donde trabaja; null, en todas. */
+  branchIds: z.array(z.string()).nullable(),
 })
 export type UserRow = z.infer<typeof userRowSchema>
 
@@ -1032,6 +1180,8 @@ export const updateUserSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   roleId: z.string().min(1).optional(),
   active: z.boolean().optional(),
+  /** Sucursales donde trabaja; null o vacío, en todas. */
+  branchIds: z.array(z.string().min(1)).nullable().optional(),
 })
 export type UpdateUserBody = z.infer<typeof updateUserSchema>
 
@@ -1759,6 +1909,8 @@ export type ProductionRow = z.infer<typeof productionRowSchema>
 export const reportRangeQuerySchema = z.object({
   from: z.coerce.number().int(),
   to: z.coerce.number().int(),
+  /** Solo lo de esta sucursal (quien trabaja en algunas, ve solo las suyas). */
+  branchId: z.string().min(1).optional(),
 })
 
 export const resultsReportSchema = z.object({
@@ -1892,6 +2044,9 @@ export const taxBookSchema = z.object({
       contactTaxId: z.string().nullable(),
       /** Número de la factura del proveedor (compras). */
       externalRef: z.string().nullable(),
+      /** Ventas con factura: su número y su número de control, si ya se anotaron. */
+      invoiceNumber: z.string().nullable(),
+      controlNumber: z.string().nullable(),
       /** Con signo: las devoluciones y anulaciones restan. */
       totalLegalMinor: safeInt,
       /** IGTF cobrado (ventas). */
@@ -2213,6 +2368,12 @@ export const featuresSchema = z.object({
   recipes: z.boolean(),
   /** Propinas al cobrar, para un mesonero o para el equipo, con su informe. */
   tips: z.boolean(),
+  /** Balanza: etiquetas con el peso o el precio y lectura del peso por el puerto serie. */
+  scale: z.boolean(),
+  /** Varias sucursales contra este servidor: inventario, cajas, personal e informes de cada una. */
+  branches: z.boolean(),
+  /** Catálogo en línea: una página pública con los productos, sus fotos y sus precios. */
+  catalog: z.boolean(),
 })
 export type Features = z.infer<typeof featuresSchema>
 
@@ -2242,12 +2403,16 @@ export const stockLocationSchema = z.object({
   active: z.boolean(),
   /** Productos con existencia distinta de cero en esta ubicación. */
   productsInStock: safeInt,
+  branchId: z.string(),
+  branchName: z.string(),
 })
 export type StockLocation = z.infer<typeof stockLocationSchema>
 
 export const createLocationSchema = z.object({
   name: z.string().trim().min(1).max(60),
   kind: locationKindSchema,
+  /** Sucursal a la que pertenece; si falta, la principal. */
+  branchId: z.string().min(1).optional(),
 })
 export type CreateLocationBody = z.infer<typeof createLocationSchema>
 
@@ -2264,6 +2429,8 @@ export const terminalSchema = z.object({
   name: z.string(),
   locationId: z.string(),
   locationName: z.string(),
+  branchId: z.string(),
+  branchName: z.string(),
   active: z.boolean(),
   /** Si tiene un turno abierto. */
   shiftOpen: z.boolean(),
@@ -2288,6 +2455,40 @@ export const updateTerminalSchema = z.object({
   active: z.boolean().optional(),
 })
 export type UpdateTerminalBody = z.infer<typeof updateTerminalSchema>
+
+// Sucursales
+
+/** Un local del negocio con sus ubicaciones y sus cajas. */
+export const branchSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  address: z.string().nullable(),
+  phone: z.string().nullable(),
+  /** Lista de precios con que vende; null, el precio base. */
+  priceListId: z.string().nullable(),
+  active: z.boolean(),
+  /** Cuántas ubicaciones y cajas activas tiene. */
+  locations: safeInt,
+  terminals: safeInt,
+})
+export type BranchInfo = z.infer<typeof branchSchema>
+
+const branchFields = {
+  name: z.string().trim().min(1).max(60),
+  address: z.string().trim().max(200).nullish(),
+  phone: z.string().trim().max(40).nullish(),
+  priceListId: z.string().min(1).nullish(),
+}
+
+/** Al crearla, llega con su tienda y su primera caja: lista para vender. */
+export const createBranchSchema = z.object(branchFields)
+export type CreateBranchBody = z.infer<typeof createBranchSchema>
+
+export const updateBranchSchema = z
+  .object(branchFields)
+  .partial()
+  .extend({ active: z.boolean().optional() })
+export type UpdateBranchBody = z.infer<typeof updateBranchSchema>
 
 // Lotes con vencimiento
 
@@ -2331,6 +2532,521 @@ export const lotSettingsSchema = z.object({
   alertDays: z.number().int().min(1).max(365),
 })
 export type LotSettings = z.infer<typeof lotSettingsSchema>
+
+// Claves de la API
+
+/** Una clave de la API, sin su secreto (solo se ve al crearla). */
+export const apiKeySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  /** El comienzo del secreto («mwk_Ab12Cd34»), para reconocerla. */
+  prefix: z.string(),
+  permissions: z.array(z.enum(API_KEY_PERMISSIONS)),
+  /** Quien la creó: la clave actúa como esa persona. */
+  userId: z.string(),
+  userName: z.string(),
+  createdAt: safeInt,
+  lastUsedAt: safeInt.nullable(),
+  revokedAt: safeInt.nullable(),
+})
+export type ApiKey = z.infer<typeof apiKeySchema>
+
+export const createApiKeySchema = z.object({
+  name: z.string().trim().min(1, "Escribe para qué es").max(60),
+  permissions: z
+    .array(z.enum(API_KEY_PERMISSIONS))
+    .min(1, "Elige al menos un permiso")
+    .max(API_KEY_PERMISSIONS.length),
+})
+export type CreateApiKeyBody = z.infer<typeof createApiKeySchema>
+
+/** La clave recién creada con su secreto: no se vuelve a mostrar. */
+export const createdApiKeySchema = z.object({ key: apiKeySchema, secret: z.string() })
+export type CreatedApiKey = z.infer<typeof createdApiKeySchema>
+
+// Webhooks
+
+/** Lo que puede avisar un webhook. */
+export const WEBHOOK_EVENTS = [
+  "sale.posted",
+  "document.posted",
+  "document.voided",
+  "shift.opened",
+  "shift.closed",
+  "rate.updated",
+  "order.created",
+] as const
+export const webhookEventSchema = z.enum(WEBHOOK_EVENTS)
+export type WebhookEvent = z.infer<typeof webhookEventSchema>
+
+const webhookUrlSchema = z
+  .string()
+  .trim()
+  .max(500)
+  .refine((u) => /^https?:\/\/[^\s/]+/i.test(u), "Escribe una dirección que empiece con https://")
+
+export const webhookSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  url: z.string(),
+  events: z.array(webhookEventSchema),
+  /** Con él se firma cada aviso (cabecera `x-millhiore-signature`). */
+  secret: z.string(),
+  active: z.boolean(),
+  createdAt: safeInt,
+  /** El último aviso: cuándo y cómo le fue; null si todavía no hubo. */
+  last: z
+    .object({
+      status: z.enum(["pending", "delivered", "failed"]),
+      at: safeInt,
+      lastStatus: safeInt.nullable(),
+    })
+    .nullable(),
+})
+export type Webhook = z.infer<typeof webhookSchema>
+
+export const createWebhookSchema = z.object({
+  name: z.string().trim().min(1, "Escribe para qué es").max(60),
+  url: webhookUrlSchema,
+  events: z.array(webhookEventSchema).min(1, "Elige al menos un evento"),
+})
+export type CreateWebhookBody = z.infer<typeof createWebhookSchema>
+
+export const updateWebhookSchema = z.object({
+  name: z.string().trim().min(1).max(60).optional(),
+  url: webhookUrlSchema.optional(),
+  events: z.array(webhookEventSchema).min(1, "Elige al menos un evento").optional(),
+  active: z.boolean().optional(),
+})
+export type UpdateWebhookBody = z.infer<typeof updateWebhookSchema>
+
+// Conectar otros equipos de la red local
+
+export const networkInfoSchema = z.object({
+  /** Direcciones para abrir la app desde un celular o una tablet de la red local. */
+  httpUrls: z.array(z.string()),
+  /** Las mismas con HTTPS (vacío si está apagado); exigen instalar antes la autoridad local. */
+  httpsUrls: z.array(z.string()),
+  /** De dónde se descarga el certificado de la autoridad (por HTTP, para poder instalarlo). */
+  caUrls: z.array(z.string()),
+  /** Huella SHA-256 de la autoridad, para comprobar en el equipo que es la nuestra. */
+  caFingerprint: z.string().nullable(),
+})
+export type NetworkInfo = z.infer<typeof networkInfoSchema>
+
+// Acceso remoto
+
+export const remoteStatusSchema = z.object({
+  /** El puerto en que escucha la app (para el comando de Tailscale). */
+  port: safeInt,
+  tailscale: z.object({
+    /** No está instalado, está apagado, falta entrar con la cuenta o está funcionando. */
+    state: z.enum(["missing", "stopped", "loggedOut", "running"]),
+    /** El nombre de esta PC en Tailscale. */
+    name: z.string().nullable(),
+    /** La red de Tailscale (la cuenta). */
+    tailnet: z.string().nullable(),
+    /** Para abrir la app desde los equipos propios, estén donde estén. */
+    httpUrl: z.string().nullable(),
+    /** La misma con HTTPS válido de Tailscale (si se activó). */
+    httpsUrl: z.string().nullable(),
+  }),
+})
+export type RemoteStatus = z.infer<typeof remoteStatusSchema>
+
+export const serveResultSchema = z.object({
+  ok: z.boolean(),
+  /** Tailscale pide habilitar HTTPS en la cuenta: se abre esta dirección y se vuelve a intentar. */
+  approveUrl: z.string().nullable(),
+  message: z.string(),
+})
+export type ServeResult = z.infer<typeof serveResultSchema>
+
+// Catálogo en línea
+
+/** Cómo se ve el catálogo en línea. */
+export const storefrontSettingsSchema = z.object({
+  /** Un aviso arriba del catálogo: horario, zonas de delivery, formas de pago. */
+  message: z.string().trim().max(300).nullable(),
+  /** WhatsApp para escribir y pedir; null = el teléfono del negocio. */
+  whatsapp: z.string().trim().max(40).nullable(),
+  /** Lista de precios del catálogo; null = el precio normal. */
+  priceListId: z.string().min(1).nullable(),
+  /** Precios en las dos monedas, solo en la de referencia ($) o solo en bolívares. */
+  currencies: z.enum(["both", "reference", "legal"]),
+  /** Lo que se acabó: se marca «agotado», no se muestra, o se muestra igual. */
+  soldOut: z.enum(["mark", "hide", "ignore"]),
+  /** Categorías que no salen (insumos, uso interno). */
+  hiddenCategoryIds: z.array(z.string().min(1)).max(200),
+  /** Sucursal cuya existencia cuenta para «agotado» (con varias sucursales). */
+  branchId: z.string().min(1),
+  /** Se puede pedir desde el catálogo (el pedido llega a «Pedidos» y por WhatsApp). */
+  orders: z.boolean(),
+  /** Ofrece delivery además de retirar en la tienda. */
+  delivery: z.boolean(),
+})
+export type StorefrontSettings = z.infer<typeof storefrontSettingsSchema>
+
+export const updateStorefrontSchema = storefrontSettingsSchema.partial()
+export type UpdateStorefrontBody = z.infer<typeof updateStorefrontSchema>
+
+export const storefrontStatusSchema = z.object({
+  settings: storefrontSettingsSchema,
+  /** El puerto que solo sirve el catálogo (lo que se publica en internet); null si está apagado. */
+  port: safeInt.nullable(),
+  /** Para abrirlo desde la red local (por ese puerto). */
+  urls: z.array(z.string()),
+  /** La dirección pública con Tailscale Funnel, si ya se publicó. */
+  publicUrl: z.string().nullable(),
+  /** Cómo está Tailscale en esta PC (para guiar la publicación). */
+  tailscale: z.enum(["missing", "stopped", "loggedOut", "running"]),
+  /** Productos que salen en el catálogo y cuántos tienen foto. */
+  products: safeInt,
+  withImage: safeInt,
+})
+export type StorefrontStatus = z.infer<typeof storefrontStatusSchema>
+
+/** Una forma de un producto en el catálogo, con su precio para el público (IVA incluido). */
+export const publicVariantSchema = z.object({
+  id: z.string(),
+  optionValues: z.array(z.string()).nullable(),
+  /** En la moneda de referencia y en bolívares a la tasa del día; null si no hay tasa. */
+  referenceMinor: safeInt.nullable(),
+  legalMinor: safeInt.nullable(),
+  /** Hay existencia (o no lleva); false = agotado. */
+  available: z.boolean(),
+})
+
+export const publicProductSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().nullable(),
+  categoryId: z.string().nullable(),
+  unit: productUnitSchema,
+  /** Dirección de la foto; null si no tiene. */
+  imageUrl: z.string().nullable(),
+  options: z.array(productOptionSchema).nullable(),
+  variants: z.array(publicVariantSchema).min(1),
+})
+export type PublicProduct = z.infer<typeof publicProductSchema>
+
+/** Lo que ve cualquiera en el catálogo en línea: nada de costos, códigos ni cantidades. */
+export const publicCatalogSchema = z.object({
+  business: z.object({
+    name: z.string(),
+    address: z.string().nullable(),
+    phone: z.string().nullable(),
+  }),
+  message: z.string().nullable(),
+  /** El número para wa.me (584141234567); null si no hay. */
+  whatsapp: z.string().nullable(),
+  currencies: storefrontSettingsSchema.shape.currencies,
+  referenceCurrency: z.string(),
+  legalCurrency: z.string(),
+  /** La tasa con que se calcularon los bolívares; null si no hay. */
+  rate: z.object({ value: z.string(), effectiveAt: safeInt }).nullable(),
+  categories: z.array(z.object({ id: z.string(), name: z.string() })),
+  products: z.array(publicProductSchema),
+  /** Pedir desde el catálogo; null si el negocio no recibe pedidos. */
+  orders: z
+    .object({
+      delivery: z.boolean(),
+      /** Las formas de pago que se ofrecen (sus nombres). */
+      payments: z.array(z.string()),
+    })
+    .nullable(),
+})
+export type PublicCatalog = z.infer<typeof publicCatalogSchema>
+
+// Pedidos desde el catálogo
+
+export const ORDER_STATUSES = ["new", "done", "cancelled"] as const
+export const orderStatusSchema = z.enum(ORDER_STATUSES)
+
+/** Lo que manda el cliente desde el catálogo; los precios los pone el servidor. */
+export const createOrderSchema = z.object({
+  /** Lo genera la página: si reintenta, el pedido no se anota dos veces. */
+  id: z.string().min(8).max(64),
+  name: z.string().trim().min(1, "Escribe tu nombre").max(80),
+  phone: z.string().trim().min(7, "Escribe tu teléfono").max(40),
+  delivery: z.enum(["pickup", "delivery"]),
+  address: z.string().trim().max(200).nullish(),
+  payment: z.string().trim().max(60).nullish(),
+  note: z.string().trim().max(300).nullish(),
+  lines: z
+    .array(
+      z.object({
+        variantId: z.string().min(1).max(64),
+        qtyMilli: safeInt.min(1, "La cantidad debe ser mayor que cero").max(1_000_000),
+        note: z.string().trim().max(140).nullish(),
+      }),
+    )
+    .min(1, "El pedido está vacío")
+    .max(50),
+})
+export type CreateOrderBody = z.infer<typeof createOrderSchema>
+
+export const orderLineSchema = z.object({
+  variantId: z.string(),
+  name: z.string(),
+  unit: productUnitSchema,
+  qtyMilli: safeInt,
+  /** Precio de una unidad (IVA incluido) en la moneda de referencia y en la legal. */
+  referenceMinor: safeInt.nullable(),
+  legalMinor: safeInt.nullable(),
+  note: z.string().nullable(),
+})
+
+/** Lo que vuelve al cliente: el número y los precios con que quedó anotado. */
+export const placedOrderSchema = z.object({
+  id: z.string(),
+  number: z.string(),
+  lines: z.array(orderLineSchema),
+  totalReferenceMinor: safeInt.nullable(),
+  totalLegalMinor: safeInt.nullable(),
+  referenceCurrency: z.string(),
+  legalCurrency: z.string(),
+})
+export type PlacedOrder = z.infer<typeof placedOrderSchema>
+
+/** Un pedido en la bandeja de la tienda. */
+export const webOrderSchema = placedOrderSchema.extend({
+  status: orderStatusSchema,
+  customerName: z.string(),
+  customerPhone: z.string(),
+  delivery: z.enum(["pickup", "delivery"]),
+  address: z.string().nullable(),
+  payment: z.string().nullable(),
+  note: z.string().nullable(),
+  priceListId: z.string().nullable(),
+  documentId: z.string().nullable(),
+  documentNumber: z.string().nullable(),
+  cancelReason: z.string().nullable(),
+  handledByName: z.string().nullable(),
+  handledAt: safeInt.nullable(),
+  createdAt: safeInt,
+})
+export type WebOrder = z.infer<typeof webOrderSchema>
+
+export const cancelOrderSchema = z.object({
+  reason: z.string().trim().max(200).nullish(),
+})
+
+// Plugins
+
+/** Un nombre de equipo de internet («api.ejemplo.com»), sin esquema ni puerto. */
+const hostnameSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(
+    /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/,
+    "Un dominio, p. ej. api.ejemplo.com",
+  )
+
+/** Una ruta dentro del paquete («page/index.html»), sin subir de carpeta. */
+const packagePathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .refine((p) => !p.startsWith("/") && !p.split("/").includes(".."), "Ruta inválida")
+
+/** El `manifest.json` de un plugin: quién es, qué permisos pide y qué trae. */
+export const pluginManifestSchema = z.object({
+  id: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/, "El id va en minúsculas, con números y guiones"),
+  name: z.string().trim().min(1).max(60),
+  version: z.string().regex(/^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$/, "Versión como 1.0.0"),
+  description: z.string().trim().max(300).optional(),
+  author: z.string().trim().max(80).optional(),
+  /** Lo que puede hacer en la API (nunca manejar usuarios ni ajustes). */
+  permissions: z.array(z.enum(API_KEY_PERMISSIONS)).max(API_KEY_PERMISSIONS.length).default([]),
+  /** Los eventos que recibe (los mismos de los webhooks). */
+  events: z.array(webhookEventSchema).max(WEBHOOK_EVENTS.length).default([]),
+  /** Los únicos equipos de internet a los que puede llamar (por HTTPS). */
+  network: z.array(hostnameSchema).max(10).default([]),
+  /** El código que corre en el servidor (aislado). */
+  server: packagePathSchema.optional(),
+  /** Su pantalla en la app (en un marco aislado). */
+  page: z.object({ title: z.string().trim().min(1).max(40), entry: packagePathSchema }).optional(),
+})
+export type PluginManifest = z.infer<typeof pluginManifestSchema>
+
+export const pluginSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  version: z.string(),
+  description: z.string().nullable(),
+  author: z.string().nullable(),
+  permissions: z.array(z.string()),
+  events: z.array(z.string()),
+  network: z.array(z.string()),
+  /** La pantalla en la app; null si no trae. */
+  page: z.object({ title: z.string(), url: z.string() }).nullable(),
+  hasServer: z.boolean(),
+  enabled: z.boolean(),
+  /** Está cargado y corriendo ahora mismo. */
+  running: z.boolean(),
+  installedAt: safeInt,
+  installedByName: z.string().nullable(),
+  updatedAt: safeInt,
+  lastError: z.string().nullable(),
+  lastErrorAt: safeInt.nullable(),
+  /** Eventos que esperan llegarle. */
+  pendingEvents: safeInt,
+})
+export type PluginInfo = z.infer<typeof pluginSchema>
+
+export const pluginLogSchema = z.object({
+  at: safeInt,
+  level: z.enum(["info", "error"]),
+  message: z.string(),
+})
+export type PluginLog = z.infer<typeof pluginLogSchema>
+
+/** Un plugin con pantalla, para el menú de quien puede usarla. */
+export const pluginPageSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  url: z.string(),
+})
+export type PluginPage = z.infer<typeof pluginPageSchema>
+
+// Sincronización entre servidores (central y sucursales)
+
+export const syncRoleSchema = z.enum(["standalone", "central", "satellite"])
+export type SyncRole = z.infer<typeof syncRoleSchema>
+
+/** Una sucursal con su propio servidor, vista desde el central. */
+export const syncPeerSchema = z.object({
+  id: z.string(),
+  branchId: z.string(),
+  branchName: z.string(),
+  /** El nombre de la PC de la sucursal. */
+  name: z.string(),
+  pairedAt: safeInt,
+  lastSeenAt: safeInt.nullable(),
+  lastPushAt: safeInt.nullable(),
+  documentsReceived: safeInt,
+})
+export type SyncPeer = z.infer<typeof syncPeerSchema>
+
+export const syncStatusSchema = z.object({
+  role: syncRoleSchema,
+  /** En una sucursal: su central y cómo va la sincronización. */
+  central: z
+    .object({
+      url: z.string(),
+      branchId: z.string(),
+      branchName: z.string(),
+      pairedAt: safeInt,
+      lastSyncAt: safeInt.nullable(),
+      lastMasterAt: safeInt.nullable(),
+      /** Documentos registrados aquí que todavía no llegan al central. */
+      pendingDocuments: safeInt,
+      lastError: z.string().nullable(),
+      lastErrorAt: safeInt.nullable(),
+    })
+    .nullable(),
+  /** En el central: las sucursales con servidor propio. */
+  peers: z.array(syncPeerSchema),
+})
+export type SyncStatus = z.infer<typeof syncStatusSchema>
+
+export const createPairingSchema = z.object({ branchId: z.string().min(1) })
+
+export const pairingCodeSchema = z.object({
+  /** Se escribe en la PC de la sucursal; vale una hora y una sola vez. */
+  code: z.string(),
+  branchId: z.string(),
+  expiresAt: safeInt,
+  /** Por dónde la sucursal llega a este servidor (primero las de Tailscale). */
+  urls: z.array(z.string()),
+})
+export type PairingCode = z.infer<typeof pairingCodeSchema>
+
+/** En una instalación nueva: unirla como sucursal de un central. */
+export const joinCentralSchema = z.object({
+  centralUrl: z.string().trim().min(3, "Escribe la dirección del central").max(200),
+  code: z.string().trim().min(6, "Escribe el código que muestra el central").max(40),
+  /** El nombre de esta PC (para reconocerla en el central). */
+  name: z.string().trim().max(60).optional(),
+})
+export type JoinCentralBody = z.infer<typeof joinCentralSchema>
+
+export const joinResultSchema = z.object({ businessName: z.string(), branchName: z.string() })
+
+// Alertas por Telegram
+
+/** Un chat (una persona o un grupo) que recibe las alertas. */
+export const telegramChatSchema = z.object({
+  id: z.string().regex(/^-?\d+$/, "Id de chat inválido"),
+  name: z.string().trim().min(1).max(80),
+})
+export type TelegramChat = z.infer<typeof telegramChatSchema>
+
+/** Qué alertas se mandan. */
+export const telegramAlertsSchema = z.object({
+  /** El resumen del día, a la hora elegida (0–23, en la hora del negocio). */
+  daily: z.boolean(),
+  dailyHour: z.number().int().min(0).max(23),
+  /** Un producto llegó a su existencia mínima. */
+  lowStock: z.boolean(),
+  /** Se anuló una venta, una compra u otro documento. */
+  voids: z.boolean(),
+  /** Se cerró un turno, con el arqueo (faltantes y sobrantes). */
+  shifts: z.boolean(),
+  /** Hay tasa nueva. */
+  rate: z.boolean(),
+  /** Llegó un pedido desde el catálogo en línea. */
+  orders: z.boolean(),
+})
+export type TelegramAlerts = z.infer<typeof telegramAlertsSchema>
+
+export const telegramSettingsSchema = z.object({
+  /** Hay un bot conectado (su token no se devuelve nunca). */
+  configured: z.boolean(),
+  /** El usuario del bot («@MiBodegaBot»). */
+  botName: z.string().nullable(),
+  chats: z.array(telegramChatSchema),
+  alerts: telegramAlertsSchema,
+})
+export type TelegramSettings = z.infer<typeof telegramSettingsSchema>
+
+export const updateTelegramSchema = z.object({
+  /** El token que da @BotFather («123456:ABC…»); null desconecta el bot. */
+  token: z
+    .string()
+    .trim()
+    .regex(/^\d{5,}:[\w-]{30,}$/, "Pega el token completo que te dio @BotFather")
+    .nullable()
+    .optional(),
+  chats: z.array(telegramChatSchema).max(10, "Máximo 10 chats").optional(),
+  /** Lo que no venga queda como estaba (así un cliente anterior a una alerta nueva no la borra). */
+  alerts: telegramAlertsSchema.partial().optional(),
+})
+export type UpdateTelegramBody = z.infer<typeof updateTelegramSchema>
+
+export const telegramTestSchema = z.object({ sent: safeInt, errors: z.array(z.string()) })
+export type TelegramTest = z.infer<typeof telegramTestSchema>
+
+/** Un aviso a un webhook con sus intentos. */
+export const webhookDeliverySchema = z.object({
+  id: z.string(),
+  webhookId: z.string(),
+  eventId: z.string(),
+  event: z.string(),
+  status: z.enum(["pending", "delivered", "failed"]),
+  attempts: safeInt,
+  nextAttemptAt: safeInt.nullable(),
+  lastStatus: safeInt.nullable(),
+  lastError: z.string().nullable(),
+  createdAt: safeInt,
+  deliveredAt: safeInt.nullable(),
+})
+export type WebhookDelivery = z.infer<typeof webhookDeliverySchema>
 
 // Etiquetas con código de barras
 

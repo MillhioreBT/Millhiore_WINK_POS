@@ -31,6 +31,14 @@ export const PERMISSIONS = [
 ] as const
 export type Permission = (typeof PERMISSIONS)[number]
 
+/**
+ * Lo que se le puede dar a una clave de la API: todo menos manejar usuarios y ajustes (una clave
+ * no crea usuarios, ni otras claves, ni cambia cómo funciona el negocio).
+ */
+export const API_KEY_PERMISSIONS = PERMISSIONS.filter(
+  (p) => p !== "user.manage" && p !== "settings.manage",
+)
+
 export function isPermission(value: string): value is Permission {
   return (PERMISSIONS as readonly string[]).includes(value)
 }

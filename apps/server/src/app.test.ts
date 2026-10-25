@@ -83,6 +83,7 @@ describe("impuestos", () => {
       taxpayer: "ordinary",
       pricesIncludeTax: true,
       defaultTaxId: "iva-general",
+      invoices: false,
     })
 
     const put = await h.call("/api/settings/fiscal", {

@@ -16,7 +16,9 @@ import {
   formatMoney,
   formatPercent,
   formatQty,
+  formatQtyUnit,
   formatRate,
+  perUnit,
 } from "../../lib/format"
 import { openDrawer, usePrintDocument } from "../../lib/printing"
 import { bootstrapQuery, documentQuery } from "../../lib/queries"
@@ -51,15 +53,27 @@ const KIND_LABEL: Record<string, string> = {
 
 export type BusinessInfo = Bootstrap["business"]
 
-/** Encabezado de recibos y reportes: nombre, RIF, dirección y teléfono del negocio. */
-export function BusinessHeader({ business }: { business: BusinessInfo | undefined }) {
+/**
+ * Encabezado de recibos y reportes: nombre, RIF, dirección y teléfono del negocio. Lo de una
+ * sucursal lleva su nombre y, si los tiene, su dirección y su teléfono.
+ */
+export function BusinessHeader({
+  business,
+  branch,
+}: {
+  business: BusinessInfo | undefined
+  branch?: DocumentDetail["branch"] | undefined
+}) {
   if (!business) return null
+  const address = branch?.address ?? business.address
+  const phone = branch?.phone ?? business.phone
   return (
     <>
       <p className="font-bold text-sm">{business.name}</p>
+      {branch ? <p>Sucursal {branch.name}</p> : null}
       {business.taxId ? <p>RIF {business.taxId}</p> : null}
-      {business.address ? <p>{business.address}</p> : null}
-      {business.phone ? <p>Tel. {business.phone}</p> : null}
+      {address ? <p>{address}</p> : null}
+      {phone ? <p>Tel. {phone}</p> : null}
     </>
   )
 }
@@ -91,7 +105,7 @@ function TransferReceipt({
   return (
     <div id="receipt" className="mx-auto w-full max-w-[320px] font-mono text-[12px] leading-snug">
       <div className="text-center">
-        <BusinessHeader business={business} />
+        <BusinessHeader business={business} branch={doc.branch} />
         <p className="mt-1">{TITLE[doc.type]}</p>
         <p>
           {doc.number} · {formatDateTime(doc.postedAt)}
@@ -108,7 +122,7 @@ function TransferReceipt({
         <div key={l.lineNo}>
           <p className="flex justify-between gap-2">
             <span>{l.name}</span>
-            <span>{formatQty(Math.abs(l.qtyMilli))}</span>
+            <span>{formatQtyUnit(Math.abs(l.qtyMilli), l.unit)}</span>
           </p>
           <LotLines lots={l.lots} />
         </div>
@@ -133,7 +147,7 @@ function ProductionReceipt({
   return (
     <div id="receipt" className="mx-auto w-full max-w-[320px] font-mono text-[12px] leading-snug">
       <div className="text-center">
-        <BusinessHeader business={business} />
+        <BusinessHeader business={business} branch={doc.branch} />
         <p className="mt-1">{TITLE[doc.type]}</p>
         <p>
           {doc.number} · {formatDateTime(doc.postedAt)}
@@ -149,7 +163,7 @@ function ProductionReceipt({
         <div key={l.lineNo}>
           <p className="flex justify-between gap-2 font-bold">
             <span>{l.name}</span>
-            <span>{formatQty(Math.abs(l.qtyMilli))}</span>
+            <span>{formatQtyUnit(Math.abs(l.qtyMilli), l.unit)}</span>
           </p>
           <LotLines lots={l.lots} />
           {l.ingredients.length ? (
@@ -191,7 +205,7 @@ export function Receipt({
   return (
     <div id="receipt" className="mx-auto w-full max-w-[320px] font-mono text-[12px] leading-snug">
       <div className="text-center">
-        <BusinessHeader business={business} />
+        <BusinessHeader business={business} branch={doc.branch} />
         <p className="mt-1">{TITLE[doc.type] ?? doc.type}</p>
         <p>
           {doc.number} · {formatDateTime(doc.postedAt)}
@@ -207,6 +221,12 @@ export function Receipt({
               : "Cliente"}
             : {doc.contactName}
             {doc.contactTaxId ? ` · ${doc.contactTaxId}` : ""}
+          </p>
+        ) : null}
+        {doc.invoiceRequested && doc.contactAddress ? <p>{doc.contactAddress}</p> : null}
+        {doc.invoice ? (
+          <p>
+            Factura N.º {doc.invoice.invoiceNumber} · Control {doc.invoice.controlNumber}
           </p>
         ) : null}
         {doc.expenseCategoryName ? <p>Categoría: {doc.expenseCategoryName}</p> : null}
@@ -255,7 +275,8 @@ export function Receipt({
           ))}
           <p className="flex justify-between">
             <span>
-              {formatQty(l.qtyMilli)} × {formatMoney(l.unitPriceMinor, cur)}
+              {formatQtyUnit(l.qtyMilli, l.unit)} × {formatMoney(l.unitPriceMinor, cur)}
+              {perUnit(l.unit)}
             </span>
             <span>{formatMoney(l.lineTotalMinor + l.discountMinor, cur)}</span>
           </p>
