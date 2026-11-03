@@ -11,6 +11,6 @@
     "desktop:build": "bun scripts/prepare-sidecar.ts && tauri build"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "2.12.3"
+    "@tauri-apps/cli": "2.12.4"
   }
 }
